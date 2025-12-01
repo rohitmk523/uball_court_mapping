@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Player Tracking - Basketball Court Tracking</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Player Tracking & Tag Matching</h1>
+            <nav>
+                <a href="/">Tag Visualization</a>
+                <a href="/calibration">Calibration</a>
+                <a href="/tracking">Tracking</a>
+            </nav>
+        </header>
+
+        <main>
+            <div class="tracking-controls">
+                <h2>1. Synchronization</h2>
+                <div class="control-group">
+                    <label for="syncFrame">Video Frame:</label>
+                    <input type="number" id="syncFrame" value="100" min="0">
+                    <label for="syncTimestamp">UWB Timestamp:</label>
+                    <input type="number" id="syncTimestamp" value="301564" min="0">
+                    <button id="setSyncBtn" class="btn-primary">Set Sync Point</button>
+                </div>
+                <p>Sync Status: <span id="syncStatus">Not synced</span></p>
+
+                <h2>2. Video Processing</h2>
+                <div class="control-group">
+                    <label for="startFrame">Start Frame:</label>
+                    <input type="number" id="startFrame" value="0" min="0">
+                    <label for="endFrame">End Frame:</label>
+                    <input type="number" id="endFrame" value="500" min="0">
+                    <label for="frameSkip">Frame Skip:</label>
+                    <input type="number" id="frameSkip" value="5" min="1" max="30">
+                    <button id="processVideoBtn" class="btn-primary">Process Video with YOLO</button>
+                </div>
+                <p id="processingStatus" class="status"></p>
+
+                <h2>3. Playback</h2>
+                <div class="control-group">
+                    <button id="playBtn" class="btn-secondary" disabled>Play</button>
+                    <button id="pauseBtn" class="btn-secondary" disabled>Pause</button>
+                    <button id="resetBtn" class="btn-secondary" disabled>Reset</button>
+                    <p>Frame: <span id="currentFrame">0</span> / <span id="totalFrames">0</span></p>
+                    <p>Timestamp: <span id="currentTimestamp">-</span></p>
+                    <p>Players Detected: <span id="playerCount">0</span></p>
+                    <p>Tags Matched: <span id="matchedTags">0</span></p>
+                </div>
+            </div>
+
+            <div class="tracking-visualization">
+                <div class="video-panel">
+                    <h3>Video with Player Detection</h3>
+                    <canvas id="videoCanvas"></canvas>
+                    <input type="range" id="videoTimeline" min="0" max="100" value="0" disabled>
+                </div>
+
+                <div class="court-panel">
+                    <h3>Court with Matched Tags</h3>
+                    <canvas id="courtCanvas"></canvas>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script src="/static/js/utils.js"></script>
+    <script src="/static/js/tracking.js"></script>
+</body>
+</html>

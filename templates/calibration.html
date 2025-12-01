@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Calibration - Basketball Court Tracking</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Court-to-Video Calibration</h1>
+            <nav>
+                <a href="/">Tag Visualization</a>
+                <a href="/calibration">Calibration</a>
+                <a href="/tracking">Tracking</a>
+            </nav>
+        </header>
+
+        <main>
+            <div class="calibration-instructions">
+                <h2>Instructions</h2>
+                <ol>
+                    <li>Click corresponding points on the court image (left) and video frame (right)</li>
+                    <li>Select 10-15 well-distributed points across the court</li>
+                    <li>Points will be numbered automatically</li>
+                    <li>Click "Submit" when you have enough points</li>
+                </ol>
+                <p>Status: <span id="calibrationStatus">Not calibrated</span></p>
+                <p>Points selected: <span id="pointCount">0</span></p>
+            </div>
+
+            <div class="calibration-images">
+                <div class="image-panel">
+                    <h3>Court (Click here first)</h3>
+                    <canvas id="courtCanvas"></canvas>
+                </div>
+
+                <div class="image-panel">
+                    <h3>Video Frame (Click here second)</h3>
+                    <canvas id="videoCanvas"></canvas>
+                </div>
+            </div>
+
+            <div class="calibration-controls">
+                <button id="loadVideoFrame" class="btn-secondary">Load Video Frame</button>
+                <input type="number" id="frameNumber" value="100" min="0" max="10000" placeholder="Frame number">
+                <button id="clearPoints" class="btn-secondary">Clear All Points</button>
+                <button id="undoPoint" class="btn-secondary">Undo Last Point</button>
+                <button id="submitCalibration" class="btn-primary" disabled>Submit Calibration</button>
+            </div>
+        </main>
+    </div>
+
+    <script src="/static/js/utils.js"></script>
+    <script src="/static/js/calibration.js"></script>
+</body>
+</html>

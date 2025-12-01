@@ -1,0 +1,20 @@
+name: court_tracking
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.12
+  - pip
+  - pip:
+    - fastapi==0.109.0
+    - uvicorn[standard]==0.27.0
+    - ezdxf==1.2.0
+    - opencv-python==4.9.0.80
+    - ultralytics==8.1.0
+    - numpy==1.26.3
+    - Pillow==10.2.0
+    - python-multipart==0.0.6
+    - jinja2==3.1.3
+    - filterpy==1.4.5
+    - scipy==1.12.0
+    - lap==0.4.0
