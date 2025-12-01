@@ -9,7 +9,7 @@ class TagAnimator {
         this.timeRange = [0, 0];
         this.currentTimestamp = 0;
         this.isPlaying = false;
-        this.targetFPS = 15;
+        this.targetFPS = 30;
         this.actualFPS = 0;
         this.lastFrameTime = 0;
         this.animationFrameId = null;
@@ -126,6 +126,10 @@ class TagAnimator {
             this.currentTimestamp = minTs;
 
             console.log(`Loaded ${this.tagIds.length} tags, time range: ${minTs} - ${maxTs}`);
+            console.log(`Duration: ${((maxTs - minTs) / 1000000).toFixed(1)} seconds`);
+
+            // Render initial frame
+            this.updateFrame();
 
         } catch (error) {
             console.error('Failed to load tag data:', error);
@@ -202,23 +206,10 @@ class TagAnimator {
             const positions = this.tagData[tagId];
             if (!positions || positions.length === 0) continue;
 
-            // Find closest position to current timestamp
-            let closest = positions[0];
-            let minDiff = Math.abs(positions[0].timestamp - this.currentTimestamp);
+            // Use binary search to find closest position
+            const closest = this.findClosestPosition(positions, this.currentTimestamp);
 
-            for (const pos of positions) {
-                const diff = Math.abs(pos.timestamp - this.currentTimestamp);
-                if (diff < minDiff) {
-                    minDiff = diff;
-                    closest = pos;
-                }
-
-                // Early exit if we've passed the timestamp
-                if (pos.timestamp > this.currentTimestamp) break;
-            }
-
-            // Only include if within reasonable tolerance (e.g., 1 second in UWB units)
-            if (minDiff < 1000000) {
+            if (closest) {
                 currentTags.push({
                     tag_id: tagId,
                     x: closest.x,
@@ -228,13 +219,51 @@ class TagAnimator {
             }
         }
 
+        console.log(`[updateFrame] Current timestamp: ${this.currentTimestamp}, Tags found: ${currentTags.length}`, currentTags);
+
         // Update court renderer
         if (window.courtRenderer) {
             window.courtRenderer.updateTags(currentTags);
+        } else {
+            console.error('[tagAnimator] window.courtRenderer not found!');
         }
 
         // Update timestamp display
         document.getElementById('currentTimestamp').textContent = this.currentTimestamp.toFixed(0);
+    }
+
+    findClosestPosition(positions, timestamp) {
+        if (!positions || positions.length === 0) return null;
+
+        // Binary search for closest timestamp
+        let left = 0;
+        let right = positions.length - 1;
+
+        // Handle edge cases
+        if (timestamp <= positions[0].timestamp) return positions[0];
+        if (timestamp >= positions[right].timestamp) return positions[right];
+
+        while (left <= right) {
+            const mid = Math.floor((left + right) / 2);
+
+            if (positions[mid].timestamp === timestamp) {
+                return positions[mid];
+            }
+
+            if (positions[mid].timestamp < timestamp) {
+                left = mid + 1;
+            } else {
+                right = mid - 1;
+            }
+        }
+
+        // At this point, right < left
+        // positions[right].timestamp < timestamp < positions[left].timestamp
+        // Return the closer one
+        const diffLeft = Math.abs(positions[left].timestamp - timestamp);
+        const diffRight = Math.abs(positions[right].timestamp - timestamp);
+
+        return diffLeft < diffRight ? positions[left] : positions[right];
     }
 }
 

@@ -48,6 +48,12 @@ async def tracking_page(request: Request):
     return templates.TemplateResponse("tracking.html", {"request": request})
 
 
+@app.get("/tag-viewer", response_class=HTMLResponse)
+async def tag_viewer_page(request: Request):
+    """Simplified tag viewer page (working version)."""
+    return templates.TemplateResponse("tag_viewer.html", {"request": request})
+
+
 @app.get("/health")
 async def health_check():
     """Health check endpoint."""

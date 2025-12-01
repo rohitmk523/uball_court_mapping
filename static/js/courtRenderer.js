@@ -23,8 +23,10 @@ class CourtRenderer {
 
     async loadCourtGeometry() {
         try {
+            console.log('[courtRenderer] Loading court geometry...');
             const response = await fetch('/api/court/geometry');
             this.courtGeometry = await response.json();
+            console.log('[courtRenderer] Court geometry loaded:', this.courtGeometry.bounds);
             this.setupCanvas();
             this.render();
         } catch (error) {
@@ -53,6 +55,15 @@ class CourtRenderer {
 
         this.offsetX = this.margin - bounds.min_x * this.scale;
         this.offsetY = this.margin + bounds.max_y * this.scale; // Flip Y
+
+        console.log('[courtRenderer] Canvas setup:', {
+            canvasWidth: this.canvas.width,
+            canvasHeight: this.canvas.height,
+            courtBounds: bounds,
+            scale: this.scale,
+            offsetX: this.offsetX,
+            offsetY: this.offsetY
+        });
     }
 
     courtToCanvas(x, y) {
@@ -77,6 +88,17 @@ class CourtRenderer {
         this.drawLines();
         this.drawCircles();
         this.drawTags();
+
+        // Debug: Draw a big red test circle in the center
+        if (this.tags && this.tags.length > 0) {
+            const centerX = this.canvas.width / 2;
+            const centerY = this.canvas.height / 2;
+            this.ctx.fillStyle = 'red';
+            this.ctx.beginPath();
+            this.ctx.arc(centerX, centerY, 20, 0, 2 * Math.PI);
+            this.ctx.fill();
+            console.log(`[courtRenderer] Drew test red circle at canvas center (${centerX}, ${centerY})`);
+        }
     }
 
     drawPolylines() {
@@ -130,7 +152,16 @@ class CourtRenderer {
     }
 
     drawTags() {
-        if (!this.tags || this.tags.length === 0) return;
+        if (!this.tags || this.tags.length === 0) {
+            return;
+        }
+
+        // Log first tag for debugging
+        if (this.tags.length > 0) {
+            const firstTag = this.tags[0];
+            const pos = this.courtToCanvas(firstTag.x, firstTag.y);
+            console.log(`[courtRenderer] Drawing tag ${firstTag.tag_id}: court (${firstTag.x}, ${firstTag.y}) -> canvas (${pos.x.toFixed(1)}, ${pos.y.toFixed(1)})`);
+        }
 
         this.tags.forEach((tag, index) => {
             const pos = this.courtToCanvas(tag.x, tag.y);
@@ -151,6 +182,7 @@ class CourtRenderer {
     }
 
     updateTags(tags) {
+        console.log(`[courtRenderer] updateTags called with ${tags.length} tags`, tags);
         this.tags = tags;
         this.render();
     }
@@ -161,16 +193,15 @@ class CourtRenderer {
     }
 }
 
-// Global instance
-let courtRenderer = null;
-
 // Initialize when DOM is ready
 if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', () => {
-        courtRenderer = new CourtRenderer('courtCanvas');
+        window.courtRenderer = new CourtRenderer('courtCanvas');
+        console.log('[courtRenderer] Initialized and set on window');
     });
 } else {
-    courtRenderer = new CourtRenderer('courtCanvas');
+    window.courtRenderer = new CourtRenderer('courtCanvas');
+    console.log('[courtRenderer] Initialized and set on window');
 }
 
 console.log('Court Renderer loaded');
