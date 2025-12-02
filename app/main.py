@@ -4,7 +4,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi.responses import HTMLResponse
 
-from app.api import tags, court, calibration, tracking
+from app.api import tags, court, calibration, tracking, video
 from app.core.config import ensure_directories
 
 # Ensure directories exist
@@ -28,6 +28,7 @@ app.include_router(tags.router, prefix="/api/tags", tags=["Tags"])
 app.include_router(court.router, prefix="/api/court", tags=["Court"])
 app.include_router(calibration.router, prefix="/api/calibration", tags=["Calibration"])
 app.include_router(tracking.router, prefix="/api/tracking", tags=["Tracking"])
+app.include_router(video.router, prefix="/api/video", tags=["Video"])
 
 
 @app.get("/", response_class=HTMLResponse)

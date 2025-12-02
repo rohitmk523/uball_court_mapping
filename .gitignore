@@ -35,14 +35,26 @@ env/
 
 # Data and cache
 data/tags/
-data/calibration/
 data/cache/
 *.log
-*.dxf
+
+# Video files (heavy)
 *.mp4
 *.MP4
 *.avi
 *.mov
+
+# Model files (heavy)
+*.pt
+*.pth
+*.onnx
+*.weights
+
+# Debug and output files
+debug_*.jpg
+debug_*.png
+output/
+data/output/
 
 # OS
 .DS_Store
@@ -51,5 +63,6 @@ Thumbs.db
 # Jupyter
 .ipynb_checkpoints/
 
-# Keep example data
+# Keep important data files
 !court_2.dxf
+# Keep calibration files (small JSON/PNG files, not videos)

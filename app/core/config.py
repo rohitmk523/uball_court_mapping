@@ -20,7 +20,14 @@ VIDEO_FILE = PROJECT_ROOT / "GX020018.MP4"
 COURT_IMAGE_FILE = CALIBRATION_DIR / "court_image.png"
 VIDEO_FRAME_FILE = CALIBRATION_DIR / "video_frame.png"
 HOMOGRAPHY_FILE = CALIBRATION_DIR / "homography.json"
+CALIBRATION_FILE = CALIBRATION_DIR / "homography.json"
 SYNC_FILE = CALIBRATION_DIR / "sync.json"
+
+# Output directories
+OUTPUT_DIR = DATA_DIR / "output"
+VIDEO_OUTPUT_DIR = OUTPUT_DIR / "videos"
+COURT_VIDEO_OUTPUT_DIR = OUTPUT_DIR / "court_videos"
+EVENT_LOG_DIR = OUTPUT_DIR / "events"
 
 # Tracking parameters
 TAG_MATCH_THRESHOLD_CM = 200  # Distance threshold for tag-to-player matching
@@ -36,5 +43,17 @@ MIN_FPS = 1
 # Ensure directories exist
 def ensure_directories():
     """Create necessary directories if they don't exist."""
-    for directory in [TAGS_DIR, CALIBRATION_DIR, CACHE_DIR, DETECTIONS_CACHE_DIR]:
+    for directory in [TAGS_DIR, CALIBRATION_DIR, CACHE_DIR, DETECTIONS_CACHE_DIR, OUTPUT_DIR, VIDEO_OUTPUT_DIR, COURT_VIDEO_OUTPUT_DIR, EVENT_LOG_DIR]:
         directory.mkdir(parents=True, exist_ok=True)
+
+
+# Settings class for dependency injection
+class Settings:
+    """Application settings."""
+    TAGS_DIR = TAGS_DIR
+    CALIBRATION_FILE = CALIBRATION_FILE
+    OUTPUT_DIR = VIDEO_OUTPUT_DIR
+    VIDEO_FILE = VIDEO_FILE
+
+
+settings = Settings()
