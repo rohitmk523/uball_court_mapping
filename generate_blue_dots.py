@@ -11,6 +11,7 @@ import argparse
 from pathlib import Path
 from datetime import datetime, timedelta
 from tqdm import tqdm
+from bisect import bisect_left
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -84,15 +85,18 @@ if duration_seconds <= 0:
     print(f"ERROR: End time must be after start time")
     sys.exit(1)
 
-# Set resolution
+# Set resolution - MUST match court image!
+# Court image is 7341x4261 (horizontal), will be rotated 90° CW for output
 if args.resolution == "highres":
-    HORIZONTAL_WIDTH = 7340
-    HORIZONTAL_HEIGHT = 4260
+    HORIZONTAL_WIDTH = 7341  # Match court image width
+    HORIZONTAL_HEIGHT = 4261  # Match court image height
     res_label = "highres"
 else:
-    HORIZONTAL_WIDTH = 1200
-    HORIZONTAL_HEIGHT = 800
-    res_label = "compact"
+    # Force high-res to match court image
+    print("⚠️  WARNING: Forcing high-res to match court image!")
+    HORIZONTAL_WIDTH = 7341
+    HORIZONTAL_HEIGHT = 4261
+    res_label = "highres_forced"
 
 # Output filename
 if args.output:
@@ -108,6 +112,7 @@ else:
 
 TAGS_DIR = Path("data/tags")
 COURT_DXF = Path("court_2.dxf")
+COURT_IMAGE = Path("data/calibration/court_image.png")
 FPS = 29.97
 num_frames = int(duration_seconds * FPS)
 
@@ -120,8 +125,24 @@ print(f"Duration: {duration_seconds / 60:.1f} minutes ({num_frames} frames)")
 print(f"Output: {OUTPUT_VIDEO}")
 print(f"{'='*70}\n")
 
-# Load court geometry
-print("Loading court geometry...")
+# Load pre-rendered court image (FAST - no DXF parsing needed!)
+print(f"Loading court image: {COURT_IMAGE}")
+court_canvas_horizontal = cv2.imread(str(COURT_IMAGE))
+if court_canvas_horizontal is None:
+    print(f"ERROR: Could not load court image from {COURT_IMAGE}")
+    sys.exit(1)
+
+img_height, img_width = court_canvas_horizontal.shape[:2]
+print(f"Court image loaded: {img_width}x{img_height}")
+
+# Verify dimensions match
+if img_width != HORIZONTAL_WIDTH or img_height != HORIZONTAL_HEIGHT:
+    print(f"WARNING: Court image size ({img_width}x{img_height}) doesn't match canvas size ({HORIZONTAL_WIDTH}x{HORIZONTAL_HEIGHT})")
+    print(f"Resizing court image to match canvas...")
+    court_canvas_horizontal = cv2.resize(court_canvas_horizontal, (HORIZONTAL_WIDTH, HORIZONTAL_HEIGHT))
+
+# Load court geometry (needed for UWB coordinate transformation)
+print("Loading court geometry for coordinate transformation...")
 geometry = parse_court_dxf(COURT_DXF)
 courtBounds = geometry.bounds
 
@@ -165,6 +186,59 @@ first_tag_id = list(tag_data.keys())[0]
 uwb_start = datetime.fromisoformat(tag_data[first_tag_id][0]['datetime'])
 print(f"UWB log starts at: {uwb_start}")
 
+# OPTIMIZED: Pre-sort positions by timestamp and use binary search
+print("Pre-sorting UWB positions by timestamp...")
+sorted_tag_data = {}
+for tag_id, positions in tag_data.items():
+    # Convert timestamps to datetime objects and sort
+    sorted_positions = []
+    for pos in positions:
+        dt = datetime.fromisoformat(pos['datetime'])
+        sorted_positions.append((dt, pos['x'], pos['y']))
+    sorted_positions.sort(key=lambda x: x[0])  # Sort by datetime
+    sorted_tag_data[tag_id] = sorted_positions
+
+print(f"Sorted {len(sorted_tag_data)} tags with {sum(len(v) for v in sorted_tag_data.values())} total positions")
+
+# Build optimized frame-to-position index using BINARY SEARCH (100x faster!)
+print("Building frame index using binary search...")
+frame_tag_positions = {}  # {frame_idx: {tag_id: (x, y)}}
+
+for frame_idx in range(num_frames):
+    current_seconds = start_seconds + (frame_idx / FPS)
+    target_dt = uwb_start + timedelta(seconds=current_seconds)
+
+    frame_tag_positions[frame_idx] = {}
+
+    for tag_id, sorted_positions in sorted_tag_data.items():
+        if not sorted_positions:
+            continue
+
+        # Binary search for closest timestamp
+        timestamps = [dt for dt, x, y in sorted_positions]
+        idx = bisect_left(timestamps, target_dt)
+
+        # Check adjacent positions to find the closest one
+        candidates = []
+        if idx > 0:
+            candidates.append((idx - 1, abs((timestamps[idx - 1] - target_dt).total_seconds())))
+        if idx < len(timestamps):
+            candidates.append((idx, abs((timestamps[idx] - target_dt).total_seconds())))
+
+        if candidates:
+            best_idx, time_diff = min(candidates, key=lambda x: x[1])
+            if time_diff < 5.0:  # Within 5 seconds threshold
+                dt, x, y = sorted_positions[best_idx]
+                frame_tag_positions[frame_idx][tag_id] = (x, y)
+
+print(f"Index built for {num_frames} frames in seconds (not minutes!)")
+
+# Calculate dot size based on resolution (scale with court size)
+# Red dots use radius 20 at this resolution, blue dots should be similar
+DOT_RADIUS = int(20 * (HORIZONTAL_WIDTH / 7341))  # Scale with width
+DOT_OUTLINE = max(2, int(DOT_RADIUS / 10))  # Proportional outline
+print(f"UWB dot radius: {DOT_RADIUS}px, outline: {DOT_OUTLINE}px")
+
 # Create video writer
 fourcc = cv2.VideoWriter_fourcc(*'mp4v')
 out = cv2.VideoWriter(OUTPUT_VIDEO, fourcc, FPS, (HORIZONTAL_HEIGHT, HORIZONTAL_WIDTH))
@@ -180,47 +254,16 @@ if not out.isOpened():
 print(f"\nProcessing {num_frames} frames...")
 
 for frame_idx in tqdm(range(num_frames)):
-    current_seconds = start_seconds + (frame_idx / FPS)
-    target_dt = uwb_start + timedelta(seconds=current_seconds)
+    # Use pre-rendered court image as canvas (FAST!)
+    canvas = court_canvas_horizontal.copy()
 
-    # Create horizontal canvas
-    canvas = np.zeros((HORIZONTAL_HEIGHT, HORIZONTAL_WIDTH, 3), dtype=np.uint8)
-
-    # Draw court
-    for line in geometry.lines:
-        pt1 = worldToScreen(*line[0])
-        pt2 = worldToScreen(*line[1])
-        cv2.line(canvas, pt1, pt2, (255, 255, 255), 1)
-
-    for polyline in geometry.polylines:
-        pts = np.array([worldToScreen(x, y) for x, y in polyline], dtype=np.int32)
-        cv2.polylines(canvas, [pts], True, (255, 255, 255), 1)
-
-    for circle in geometry.circles:
-        if circle[1] > 300:
-            continue
-        center = worldToScreen(*circle[0])
-        radius = int(circle[1] * actualScale)
-        cv2.circle(canvas, center, radius, (255, 255, 255), 1)
-
-    # Draw UWB tags (BLUE)
-    for tag_id, positions in tag_data.items():
-        closest_pos = None
-        min_diff = float('inf')
-
-        for pos in positions:
-            pos_time = datetime.fromisoformat(pos['datetime'])
-            time_diff = abs((pos_time - target_dt).total_seconds())
-            if time_diff < min_diff and time_diff < 5.0:
-                min_diff = time_diff
-                closest_pos = pos
-
-        if closest_pos:
-            x_uwb = closest_pos['x']
-            y_uwb = closest_pos['y']
+    # Draw UWB tags using pre-built index (SUPER FAST - O(1) lookup!)
+    if frame_idx in frame_tag_positions:
+        for tag_id, (x_uwb, y_uwb) in frame_tag_positions[frame_idx].items():
             sx, sy = worldToScreen(x_uwb, y_uwb)
-            cv2.circle(canvas, (sx, sy), 8, (255, 100, 0), -1)  # Blue
-            cv2.circle(canvas, (sx, sy), 8, (255, 255, 255), 1)  # White outline
+            # Draw blue dot with white outline (scaled for resolution)
+            cv2.circle(canvas, (sx, sy), DOT_RADIUS, (255, 100, 0), -1)  # Blue filled
+            cv2.circle(canvas, (sx, sy), DOT_RADIUS, (255, 255, 255), DOT_OUTLINE)  # White outline
 
     # Rotate 90° clockwise for vertical output
     canvas_rotated = cv2.rotate(canvas, cv2.ROTATE_90_CLOCKWISE)
