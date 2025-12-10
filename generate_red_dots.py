@@ -207,6 +207,11 @@ print(f"Processing frames {start_frame} to {end_frame} ({num_frames} frames)")
 cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
 
 # Create video writer (output is vertical, already rotated)
+# Calculate dot size based on resolution (scale with court size) - Match blue dots!
+DOT_RADIUS = int(40 * (HORIZONTAL_WIDTH / 7341))  # Scale with width
+DOT_OUTLINE = max(2, int(DOT_RADIUS / 5))  # Thicker outline
+print(f"Player dot radius: {DOT_RADIUS}px, outline: {DOT_OUTLINE}px")
+
 fourcc = cv2.VideoWriter_fourcc(*'mp4v')
 out = cv2.VideoWriter(OUTPUT_VIDEO, fourcc, video_fps, (CANVAS_WIDTH, CANVAS_HEIGHT))
 
@@ -283,8 +288,8 @@ for frame_idx in tqdm(range(num_frames)):
 
             # Check bounds and draw on vertical canvas (already rotated)
             if 0 <= canvas_x < CANVAS_WIDTH and 0 <= canvas_y < CANVAS_HEIGHT:
-                cv2.circle(canvas, (canvas_x, canvas_y), 20, (0, 0, 255), -1)  # Red filled
-                cv2.circle(canvas, (canvas_x, canvas_y), 20, (255, 255, 255), 3)  # White outline
+                cv2.circle(canvas, (canvas_x, canvas_y), DOT_RADIUS, (0, 0, 255), -1)  # Red filled
+                cv2.circle(canvas, (canvas_x, canvas_y), DOT_RADIUS, (255, 255, 255), DOT_OUTLINE)  # White outline
         except Exception as e:
             frame_data["players"].append({
                 "video_pixel": [int(bx), int(by)],

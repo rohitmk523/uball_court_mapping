@@ -24,16 +24,26 @@ from app.services.dxf_parser import parse_court_dxf
 # PARSE ARGUMENTS
 # ============================================================================
 
-if len(sys.argv) != 5:
-    print("Usage: python combine_videos_tagged.py <start_time> <end_time> <red_coords_json> <output_suffix>")
-    print("\nExample:")
-    print("  python combine_videos_tagged.py 00:15:00 00:20:00 red_coords_15to20min.json v3")
-    sys.exit(1)
+import argparse
 
-START_TIME = sys.argv[1]
-END_TIME = sys.argv[2]
-RED_COORDS_JSON = sys.argv[3]
-SUFFIX = sys.argv[4]
+# ============================================================================
+# PARSE ARGUMENTS
+# ============================================================================
+
+parser = argparse.ArgumentParser(description='Combine red and blue dot videos with tagging logic')
+parser.add_argument('start_time', help='Start time in HH:MM:SS')
+parser.add_argument('end_time', help='End time in HH:MM:SS')
+parser.add_argument('red_coords_json', help='Path to red dot coordinates JSON file')
+parser.add_argument('output_suffix', help='Suffix for output filename')
+parser.add_argument('--sync-offset', type=float, default=785.0, help='Sync offset in seconds (video ahead of UWB). Default: 785.0')
+
+args = parser.parse_args()
+
+START_TIME = args.start_time
+END_TIME = args.end_time
+RED_COORDS_JSON = args.red_coords_json
+SUFFIX = args.output_suffix
+UWB_SYNC_OFFSET = args.sync_offset
 
 def parse_time(time_str):
     """Convert HH:MM:SS to seconds"""
@@ -156,10 +166,8 @@ for tag_id, positions in tag_data.items():
     sorted_positions.sort(key=lambda x: x[0])
     sorted_tag_data[tag_id] = sorted_positions
 
-# Sync offset (from sync analysis): video is 785 seconds ahead of UWB
-# This means video time 0 corresponds to UWB time -785s
-# Or equivalently: UWB time = video time + 785s
-UWB_SYNC_OFFSET = 785  # seconds (13 min 5 sec)
+# Sync offset is now loaded from arguments
+# UWB_SYNC_OFFSET = args.sync_offset
 
 # Build frame-to-UWB-position index
 print("Building UWB frame index...")

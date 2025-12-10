@@ -92,11 +92,12 @@ if args.resolution == "highres":
     HORIZONTAL_HEIGHT = 4261  # Match court image height
     res_label = "highres"
 else:
-    # Force high-res to match court image
-    print("⚠️  WARNING: Forcing high-res to match court image!")
-    HORIZONTAL_WIDTH = 7341
-    HORIZONTAL_HEIGHT = 4261
-    res_label = "highres_forced"
+    # Compact mode: Scale down to ~25% size (~1835x1065)
+    # This gives ~1080p vertical resolution
+    scale_factor = 0.25
+    HORIZONTAL_WIDTH = int(7341 * scale_factor)
+    HORIZONTAL_HEIGHT = int(4261 * scale_factor) 
+    res_label = "compact"
 
 # Output filename
 if args.output:
@@ -139,7 +140,8 @@ print(f"Court image loaded: {img_width}x{img_height}")
 if img_width != HORIZONTAL_WIDTH or img_height != HORIZONTAL_HEIGHT:
     print(f"WARNING: Court image size ({img_width}x{img_height}) doesn't match canvas size ({HORIZONTAL_WIDTH}x{HORIZONTAL_HEIGHT})")
     print(f"Resizing court image to match canvas...")
-    court_canvas_horizontal = cv2.resize(court_canvas_horizontal, (HORIZONTAL_WIDTH, HORIZONTAL_HEIGHT))
+    # Use INTER_AREA for better downscaling quality
+    court_canvas_horizontal = cv2.resize(court_canvas_horizontal, (HORIZONTAL_WIDTH, HORIZONTAL_HEIGHT), interpolation=cv2.INTER_AREA)
 
 # Load court geometry (needed for UWB coordinate transformation)
 print("Loading court geometry for coordinate transformation...")
@@ -204,7 +206,7 @@ print(f"Sorted {len(sorted_tag_data)} tags with {sum(len(v) for v in sorted_tag_
 print("Building frame index using binary search...")
 frame_tag_positions = {}  # {frame_idx: {tag_id: (x, y)}}
 
-for frame_idx in range(num_frames):
+for frame_idx in tqdm(range(num_frames), desc="Building index", unit="frames"):
     current_seconds = start_seconds + (frame_idx / FPS)
     target_dt = uwb_start + timedelta(seconds=current_seconds)
 
@@ -231,12 +233,12 @@ for frame_idx in range(num_frames):
                 dt, x, y = sorted_positions[best_idx]
                 frame_tag_positions[frame_idx][tag_id] = (x, y)
 
-print(f"Index built for {num_frames} frames in seconds (not minutes!)")
+print(f"✅ Index built for {num_frames} frames")
 
 # Calculate dot size based on resolution (scale with court size)
-# Red dots use radius 20 at this resolution, blue dots should be similar
-DOT_RADIUS = int(20 * (HORIZONTAL_WIDTH / 7341))  # Scale with width
-DOT_OUTLINE = max(2, int(DOT_RADIUS / 10))  # Proportional outline
+# Increased multiplier (20->40) for better visibility in compact mode
+DOT_RADIUS = int(40 * (HORIZONTAL_WIDTH / 7341))  # Scale with width
+DOT_OUTLINE = max(2, int(DOT_RADIUS / 5))  # Thicker outline
 print(f"UWB dot radius: {DOT_RADIUS}px, outline: {DOT_OUTLINE}px")
 
 # Create video writer
@@ -264,6 +266,28 @@ for frame_idx in tqdm(range(num_frames)):
             # Draw blue dot with white outline (scaled for resolution)
             cv2.circle(canvas, (sx, sy), DOT_RADIUS, (255, 100, 0), -1)  # Blue filled
             cv2.circle(canvas, (sx, sy), DOT_RADIUS, (255, 255, 255), DOT_OUTLINE)  # White outline
+
+            # Draw Tag ID
+            label = str(tag_id)
+            # Reduced font size based on user feedback (relative to dot size)
+            if "compact" in res_label:
+                font_scale = 0.6
+                thickness = 1
+            else:
+                font_scale = 1.5
+                thickness = 2
+            
+            # Get text size
+            (w, h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness)
+            
+            # Position text above dot
+            text_x = sx - w // 2
+            text_y = sy - DOT_RADIUS - 10
+            
+            # Draw text shadow/outline (black)
+            cv2.putText(canvas, label, (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0, 0, 0), thickness + 2)
+            # Draw text (white)
+            cv2.putText(canvas, label, (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 255), thickness)
 
     # Rotate 90° clockwise for vertical output
     canvas_rotated = cv2.rotate(canvas, cv2.ROTATE_90_CLOCKWISE)

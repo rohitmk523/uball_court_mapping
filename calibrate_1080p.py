@@ -13,7 +13,7 @@ from calibration_tool import CalibrationTool
 def main():
     """Run 1080p calibration."""
     # Paths for 1080p
-    video_path = "GX020018_1080p.MP4"
+    video_path = sys.argv[1] if len(sys.argv) > 1 else "GX020018_1080p.MP4"
     court_image_path = "data/calibration/court_image.png"
     output_dir = "data/calibration/1080p"
 
