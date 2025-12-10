@@ -14,6 +14,9 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# Import DXF parser for coordinate transformation
+from app.services.dxf_parser import parse_court_dxf
+
 
 class UWBAssociator:
     """Associates tracked players with UWB tags using spatial proximity"""
@@ -23,9 +26,12 @@ class UWBAssociator:
         tags_dir: Path,
         sync_offset_seconds: float,
         uwb_start_time: Optional[datetime] = None,
-        proximity_threshold: float = 2.0,
+        proximity_threshold: float = 200.0,  # Pixels (increased from 2.0 meters)
         validation_window: float = 5.0,
-        remapping_cooldown: int = 30
+        remapping_cooldown: int = 30,
+        court_dxf: Path = Path("court_2.dxf"),
+        canvas_width: int = 4261,  # Rotated canvas width
+        canvas_height: int = 7341  # Rotated canvas height
     ):
         """
         Initialize UWB Associator
@@ -34,15 +40,24 @@ class UWBAssociator:
             tags_dir: Directory containing UWB tag JSON files
             sync_offset_seconds: Sync offset between video and UWB (video_time + offset = uwb_time)
             uwb_start_time: UWB log start time (auto-detected if None)
-            proximity_threshold: Maximum distance (meters) for association
+            proximity_threshold: Maximum distance (pixels) for association
             validation_window: Time window (seconds) for validating existing mappings
             remapping_cooldown: Minimum frames before allowing remapping
+            court_dxf: Path to court DXF file for coordinate transformation
+            canvas_width: Canvas width after 90° rotation
+            canvas_height: Canvas height after 90° rotation
         """
         self.tags_dir = Path(tags_dir)
         self.sync_offset = sync_offset_seconds
         self.proximity_threshold = proximity_threshold
         self.validation_window = validation_window
         self.remapping_cooldown = remapping_cooldown
+
+        # Load court geometry for UWB coordinate transformation
+        self.court_dxf = court_dxf
+        self.canvas_width = canvas_width
+        self.canvas_height = canvas_height
+        self._setup_coordinate_transform()
 
         # Persistent Track ID → Tag ID mapping
         self.track_to_tag_mapping = {}
@@ -65,8 +80,55 @@ class UWBAssociator:
         logger.info(f"UWB Associator initialized")
         logger.info(f"  Tags loaded: {len(self.tag_data)}")
         logger.info(f"  Sync offset: {sync_offset_seconds}s")
-        logger.info(f"  Proximity threshold: {proximity_threshold}m")
+        logger.info(f"  Proximity threshold: {proximity_threshold}px")
         logger.info(f"  UWB start time: {self.uwb_start_time}")
+
+    def _setup_coordinate_transform(self):
+        """Setup UWB world-to-screen coordinate transformation"""
+        # Parse court DXF to get world bounds
+        geometry = parse_court_dxf(self.court_dxf)
+        self.court_bounds = geometry.bounds
+
+        # Calculate scale (same logic as generate_blue_dots.py)
+        # Note: We're working with HORIZONTAL dimensions (before 90° rotation)
+        HORIZONTAL_WIDTH = 7341  # Will be rotated to become height
+        HORIZONTAL_HEIGHT = 4261  # Will be rotated to become width
+
+        court_width = self.court_bounds.max_x - self.court_bounds.min_x
+        court_height = self.court_bounds.max_y - self.court_bounds.min_y
+
+        PADDING = 50
+        scale_x = (HORIZONTAL_WIDTH - PADDING * 2) / court_width
+        scale_y = (HORIZONTAL_HEIGHT - PADDING * 2) / court_height
+        self.scale = min(scale_x, scale_y)
+
+        scaled_width = court_width * self.scale
+        scaled_height = court_height * self.scale
+        self.offset_x = (HORIZONTAL_WIDTH - scaled_width) / 2
+        self.offset_y = (HORIZONTAL_HEIGHT - scaled_height) / 2
+
+        logger.debug(f"Coordinate transform setup: scale={self.scale:.6f}")
+
+    def _world_to_screen(self, x_world: float, y_world: float) -> Tuple[float, float]:
+        """
+        Convert UWB world coordinates to screen coordinates (BEFORE rotation)
+
+        This matches the worldToScreen() function in generate_blue_dots.py
+        Returns coordinates in horizontal orientation (will be rotated 90° CW)
+        """
+        HORIZONTAL_HEIGHT = 4261  # Height before rotation
+
+        sx = ((x_world - self.court_bounds.min_x) * self.scale) + self.offset_x
+        sy = HORIZONTAL_HEIGHT - (((y_world - self.court_bounds.min_y) * self.scale) + self.offset_y)
+
+        # After 90° CW rotation: (sx, sy) -> (sy, canvas_height - sx)
+        # But we need to compare in the same coordinate system as homography output
+        # Homography outputs coordinates in ROTATED space (4261 x 7341)
+        # So we need to rotate our coordinates too
+        rotated_x = sy
+        rotated_y = 7341 - sx  # HORIZONTAL_WIDTH - sx
+
+        return (rotated_x, rotated_y)
 
     def _load_uwb_data(self) -> Dict:
         """Load UWB tag data from JSON files"""
@@ -208,7 +270,10 @@ class UWBAssociator:
         return tracked_players
 
     def _get_uwb_positions_at_time(self, target_dt: datetime) -> Dict[int, Tuple[float, float]]:
-        """Get UWB tag positions at a specific time using binary search"""
+        """
+        Get UWB tag positions at a specific time using binary search.
+        Returns positions in SCREEN coordinates (rotated canvas space) for comparison with homography output.
+        """
         uwb_positions = {}
 
         for tag_id, sorted_positions in self.sorted_tag_data.items():
@@ -233,8 +298,10 @@ class UWBAssociator:
 
                 # Only use if within time threshold (5 seconds)
                 if time_diff < 5.0:
-                    dt, x, y = sorted_positions[best_idx]
-                    uwb_positions[tag_id] = (x, y)
+                    dt, x_world, y_world = sorted_positions[best_idx]
+                    # Transform world coordinates to screen coordinates
+                    screen_x, screen_y = self._world_to_screen(x_world, y_world)
+                    uwb_positions[tag_id] = (screen_x, screen_y)
 
         return uwb_positions
 
