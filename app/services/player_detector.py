@@ -8,6 +8,14 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# Import ByteTrack tracker
+try:
+    from app.services.bytetrack_tracker import ByteTrackTracker
+    BYTETRACK_AVAILABLE = True
+except ImportError:
+    BYTETRACK_AVAILABLE = False
+    logger.warning("ByteTrack tracker not available. Tracking functionality disabled.")
+
 
 class PlayerDetector:
     """Detects players using YOLO object detection."""
@@ -16,7 +24,9 @@ class PlayerDetector:
         self,
         model_name: str = "yolov8n.pt",
         confidence_threshold: float = 0.5,
-        device: str = "cpu"
+        device: str = "cpu",
+        enable_tracking: bool = False,
+        track_buffer: int = 50
     ):
         """
         Initialize YOLO player detector.
@@ -25,11 +35,15 @@ class PlayerDetector:
             model_name: YOLO model to use (e.g., 'yolov8n.pt', 'yolov8m.pt')
             confidence_threshold: Minimum confidence for detections
             device: Device to run inference on ('cpu' or 'cuda')
+            enable_tracking: Whether to enable ByteTrack tracking
+            track_buffer: Number of frames to keep lost tracks
         """
         self.confidence_threshold = confidence_threshold
         self.device = device
         self.model = None
         self.model_name = model_name
+        self.enable_tracking = enable_tracking
+        self.tracker = None
 
         try:
             from ultralytics import YOLO
@@ -53,6 +67,18 @@ class PlayerDetector:
 
             # Restore original torch.load
             torch.load = original_load
+
+            # Initialize ByteTrack tracker if enabled
+            if self.enable_tracking and BYTETRACK_AVAILABLE:
+                self.tracker = ByteTrackTracker(
+                    track_activation_threshold=0.25,
+                    lost_track_buffer=track_buffer,
+                    minimum_matching_threshold=0.8,
+                    frame_rate=30
+                )
+                logger.info("ByteTrack tracking enabled")
+            elif self.enable_tracking and not BYTETRACK_AVAILABLE:
+                logger.warning("Tracking requested but ByteTrack not available")
         except ImportError:
             logger.error("ultralytics package not installed. Install with: pip install ultralytics")
             raise
@@ -231,3 +257,56 @@ class PlayerDetector:
                 return idx
 
         return None
+
+    def track_players(
+        self,
+        frame: np.ndarray,
+        filter_court: bool = False,
+        court_bbox: Optional[Tuple[int, int, int, int]] = None
+    ) -> List[Dict]:
+        """
+        Detect and track players with persistent IDs.
+
+        Args:
+            frame: Input frame (BGR format)
+            filter_court: Whether to filter detections to court area
+            court_bbox: Court bounding box (x1, y1, x2, y2) for filtering
+
+        Returns:
+            List of tracked players with persistent track_id and detection data
+        """
+        if not self.enable_tracking or self.tracker is None:
+            logger.warning("Tracking not enabled. Use detect_players() instead or enable tracking in __init__")
+            return self.detect_players(frame, filter_court, court_bbox)
+
+        # First, detect players
+        detections = self.detect_players(frame, filter_court, court_bbox)
+
+        if not detections:
+            # Even if no detections, update tracker (keeps existing tracks alive)
+            return self.tracker.update([], frame)
+
+        # Update tracker with detections to get persistent IDs
+        tracked_players = self.tracker.update(detections, frame)
+
+        logger.debug(f"Tracked {len(tracked_players)} players with IDs")
+        return tracked_players
+
+    def get_track_statistics(self) -> Optional[Dict]:
+        """
+        Get tracking statistics if tracking is enabled.
+
+        Returns:
+            Dictionary with tracking stats or None if tracking disabled
+        """
+        if self.tracker is not None:
+            return self.tracker.get_track_statistics()
+        return None
+
+    def reset_tracker(self):
+        """Reset the tracker state (useful for starting new video sequences)"""
+        if self.tracker is not None:
+            self.tracker.reset()
+            logger.info("Tracker reset")
+        else:
+            logger.warning("No tracker to reset")
