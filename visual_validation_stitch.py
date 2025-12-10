@@ -60,17 +60,60 @@ def seconds_to_time(seconds):
     return f"{h:02d}:{m:02d}:{s:02d}"
 
 
-def generate_annotated_video(start_time, end_time, output_path):
-    """Generate video with YOLO detection boxes on original footage."""
+def generate_annotated_video(start_time, end_time, output_path, sync_offset):
+    """Generate video with YOLO detection boxes + Tag IDs on original footage."""
     start_seconds = time_to_seconds(start_time)
     end_seconds = time_to_seconds(end_time)
 
-    print(f"\n1. Generating annotated video (YOLO11 boxes on original)...")
+    print(f"\n1. Generating annotated video (YOLO11 boxes + Tag IDs on original)...")
     print(f"   Input: {VIDEO_PATH}")
     print(f"   Time: {start_time} to {end_time}")
+    print(f"   Sync offset: {sync_offset}s for UWB association")
 
-    # Load player detector with YOLO11
-    player_detector = PlayerDetector(model_name="yolo11n.pt", confidence_threshold=0.3)
+    # Load player detector with ByteTrack tracking
+    player_detector = PlayerDetector(
+        model_name="yolo11n.pt",
+        confidence_threshold=0.3,
+        enable_tracking=True,
+        track_buffer=50
+    )
+
+    # Load calibration for court projection
+    from app.services.calibration_integration import CalibrationIntegration
+    calibration = CalibrationIntegration("data/calibration/1080p/homography.json")
+
+    # Load UWB data and setup association
+    from datetime import datetime, timedelta
+    from bisect import bisect_left
+    import json
+    from pathlib import Path
+
+    # Load UWB tags
+    tags_dir = Path("data/tags")
+    tag_data = {}
+    for tag_file in tags_dir.glob('*.json'):
+        with open(tag_file, 'r') as f:
+            data = json.load(f)
+            tag_data[data['tag_id']] = data['positions']
+
+    # Get UWB start time
+    first_tag_id = list(tag_data.keys())[0]
+    uwb_start = datetime.fromisoformat(tag_data[first_tag_id][0]['datetime'])
+
+    # Pre-sort UWB data
+    sorted_tag_data = {}
+    for tag_id, positions in tag_data.items():
+        sorted_positions = []
+        for pos in positions:
+            dt = datetime.fromisoformat(pos['datetime'])
+            sorted_positions.append((dt, pos['x'], pos['y']))
+        sorted_positions.sort(key=lambda x: x[0])
+        sorted_tag_data[tag_id] = sorted_positions
+
+    print(f"   Loaded {len(tag_data)} UWB tags for association")
+
+    # Association log
+    association_log = {}
 
     # Open video
     cap = cv2.VideoCapture(VIDEO_PATH)
@@ -88,31 +131,111 @@ def generate_annotated_video(start_time, end_time, output_path):
 
     print(f"   Processing {num_frames} frames...")
 
+    # Helper function to get UWB positions at a specific time
+    def get_uwb_positions_at_time(target_dt):
+        uwb_positions = {}
+        for tag_id, sorted_positions in sorted_tag_data.items():
+            if not sorted_positions:
+                continue
+            timestamps = [dt for dt, x, y in sorted_positions]
+            idx = bisect_left(timestamps, target_dt)
+
+            candidates = []
+            if idx > 0:
+                candidates.append((idx - 1, abs((timestamps[idx - 1] - target_dt).total_seconds())))
+            if idx < len(timestamps):
+                candidates.append((idx, abs((timestamps[idx] - target_dt).total_seconds())))
+
+            if candidates:
+                best_idx, time_diff = min(candidates, key=lambda x: x[1])
+                if time_diff < 5.0:
+                    dt, x, y = sorted_positions[best_idx]
+                    uwb_positions[tag_id] = (x, y)
+        return uwb_positions
+
     for frame_idx in tqdm(range(num_frames), desc="   Annotating"):
         ret, frame = cap.read()
         if not ret:
             break
 
-        # Run YOLO detection using PlayerDetector
-        detections = player_detector.detect_players(frame)
+        # Calculate current video time
+        current_frame = start_frame + frame_idx
+        video_time_sec = current_frame / fps
 
-        # Draw bounding boxes
-        for detection in detections:
-            bbox = detection['bbox']
-            conf = detection['confidence']
-            x1, y1, x2, y2 = bbox
+        # Get UWB positions at synchronized time
+        uwb_time_sec = video_time_sec + sync_offset
+        target_dt = uwb_start + timedelta(seconds=uwb_time_sec)
+        uwb_positions = get_uwb_positions_at_time(target_dt)
+
+        # Run YOLO detection with tracking
+        tracked_players = player_detector.track_players(frame)
+
+        # Draw bounding boxes with Tag IDs
+        for player in tracked_players:
+            bbox = player['bbox']
+            conf = player['confidence']
+            track_id = player.get('track_id')
+            x1, y1, x2, y2 = map(int, bbox)
+
+            # Project to court to find UWB association
+            bx, by = player['bottom']
+            tag_id = None
+            try:
+                court_x, court_y = calibration.image_to_court(bx, by)
+
+                # Find nearest UWB tag
+                min_dist = float('inf')
+                nearest_tag = None
+                
+                # UWB coordinates need to be rotated to match calibration system
+                # calibration.image_to_court returns (x_cal, y_cal)
+                # uwb_positions contains (x_uwb, y_uwb)
+                
+                for uwb_tag_id, (uwb_x, uwb_y) in uwb_positions.items():
+                    # Rotate UWB point to match calibration coordinate system
+                    cal_uwb_x, cal_uwb_y = calibration.rotate_uwb_to_calibration(uwb_x, uwb_y)
+                    
+                    # Calculate distance in calibration coordinate system
+                    dist = np.sqrt((court_x - cal_uwb_x)**2 + (court_y - cal_uwb_y)**2)
+                    
+                    if dist < min_dist:
+                        min_dist = dist
+                        nearest_tag = uwb_tag_id
+
+                if min_dist < 300:  # Increased threshold to 300cm (approx 3m)
+                    tag_id = nearest_tag
+                    player['tag_id'] = tag_id  # Attach to player dict
+                    # Log association
+                    if track_id not in association_log:
+                        association_log[track_id] = []
+                    association_log[track_id].append({
+                        'frame': frame_idx,
+                        'tag_id': tag_id,
+                        'distance': float(min_dist)
+                    })
+            except Exception as e:
+                # print(f"Error in association: {e}")
+                pass
 
             # Draw bounding box
             cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
 
-            # Draw confidence
-            cv2.putText(frame, f"{conf:.2f}",
+            # Draw label: Tag ID if found, otherwise Track ID
+            if tag_id is not None:
+                label = f"Tag {tag_id}"
+                color = (0, 255, 0)  # Green for tagged
+            else:
+                label = f"Track {track_id}" if track_id is not None else "Track ?"
+                color = (0, 165, 255)  # Orange for untagged
+
+            cv2.putText(frame, label,
                       (x1, y1 - 5),
-                      cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+                      cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
 
         # Add info overlay
         current_time = start_seconds + (frame_idx / fps)
-        info_text = f"Time: {int(current_time//60):02d}:{int(current_time%60):02d}.{int((current_time%1)*10)} | Detections: {len(detections)}"
+        tagged_count = sum(1 for p in tracked_players if p.get('tag_id') is not None)
+        info_text = f"Time: {int(current_time//60):02d}:{int(current_time%60):02d}.{int((current_time%1)*10)} | Players: {len(tracked_players)} | Tagged: {tagged_count}"
 
         # Draw background for text
         (text_width, text_height), _ = cv2.getTextSize(info_text, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2)
@@ -125,12 +248,20 @@ def generate_annotated_video(start_time, end_time, output_path):
     cap.release()
     out.release()
 
+    # Save association log
+    log_path = output_path.replace('.mp4', '_associations.json')
+    with open(log_path, 'w') as f:
+        json.dump(association_log, f, indent=2)
+
     print(f"   ✅ Annotated video: {output_path}")
+    print(f"   ✅ Association log: {log_path}")
+    print(f"   Track→Tag associations: {len(association_log)} unique tracks")
 
 
-def generate_red_dots(start_time, end_time, output_path):
+def generate_red_dots(start_time, end_time, output_path, video_path):
     """Call generate_red_dots.py script."""
     print(f"\n2. Generating RED dots video...")
+    print(f"   Video: {video_path}")
     print(f"   Time window: {start_time} to {end_time} (VIDEO TIME)")
 
     cmd = [
@@ -138,6 +269,7 @@ def generate_red_dots(start_time, end_time, output_path):
         '--start', start_time,
         '--end', end_time,
         '--resolution', 'highres',
+        '--video', video_path,  # Pass the video path
         '--output', output_path
     ]
 
@@ -241,8 +373,8 @@ def stitch_videos(annotated_path, red_dots_path, blue_dots_path, output_path, sy
 
         # Add labels at the top of each panel
         # YOLO video label
-        cv2.rectangle(combined, (10, 10), (450, 60), (0, 0, 0), -1)
-        cv2.putText(combined, "YOLO11 Detections",
+        cv2.rectangle(combined, (10, 10), (550, 60), (0, 0, 0), -1)
+        cv2.putText(combined, "YOLO11 + Tag IDs",
                    (15, 45), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2)
 
         # Red dots label
@@ -330,8 +462,8 @@ def main():
 
     try:
         # Generate all three videos
-        generate_annotated_video(start_time, end_time, annotated_path)
-        generate_red_dots(start_time, end_time, red_dots_path)
+        generate_annotated_video(start_time, end_time, annotated_path, sync_offset)
+        generate_red_dots(start_time, end_time, red_dots_path, VIDEO_PATH)
         generate_blue_dots(start_time, end_time, sync_offset, blue_dots_path)
 
         # Stitch them together
