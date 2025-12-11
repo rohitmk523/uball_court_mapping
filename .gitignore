@@ -66,3 +66,5 @@ Thumbs.db
 # Keep important data files
 !court_2.dxf
 # Keep calibration files (small JSON/PNG files, not videos)
+
+Uball_tracking

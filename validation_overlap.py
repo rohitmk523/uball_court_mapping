@@ -28,6 +28,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from app.services.player_detector import PlayerDetector
 from app.services.calibration_integration import CalibrationIntegration
 from app.services.dxf_parser import parse_court_dxf
+from app.services.uwb_associator import UWBAssociator
 
 # Configuration
 VIDEO_PATH = "GX020018_1080p.MP4"
@@ -41,6 +42,7 @@ OUTPUT_HEIGHT = 1080
 # Colors (BGR)
 COLOR_RED = (0, 0, 255)
 COLOR_GREEN = (0, 255, 0)
+COLOR_ORANGE = (0, 165, 255) # Warning/Dropout
 COLOR_BLUE = (255, 100, 0) # UWB Dot
 COLOR_LIGHT_BLUE = (255, 200, 0) # Radius Circle
 COLOR_WHITE = (255, 255, 255)
@@ -75,45 +77,21 @@ class Validator:
         # 2. Setup Geometry for UWB -> Vertical Pixel Mapping
         self.setup_geometry()
         
-        # 3. Load UWB Data
+        # 3. Load UWB Data (Keep for local drawing)
         self.load_uwb_data()
+        
+        # Associator placeholder (initialized later with sync_offset)
+        self.uwb_associator = None
 
     def setup_geometry(self):
         """
         Setup mapping from UWB World Coords (cm) -> Vertical Canvas Pixels.
-        
-        Logic derived from combine_videos_tagged.py (which maps to horizontal)
-        and then we effectively rotate the point logic 90 CW.
-        
-        Horizontal Canvas (W_h, H_h) = (7341, 4261)
-        Vertical Canvas (W_v, H_v) = (4261, 7341)
-        
-        Rotation 90 CW: (x_h, y_h) -> (H_h - 1 - y_h, x_h)
-        Wait, cv2.rotate(ROTATE_90_CLOCKWISE):
-        New X = Original Y? No.
-        New X = H_orig - Y_orig
-        New Y = X_orig
-        Let's verify.
-        Top-Left (0,0) -> Top-Right (W, 0) in rotated? No.
-        (0,0) -> (H-0, 0) ? 
-        
-        Let's use the explicit coordinate transform that matches visual output.
-        Vertical Canvas X (0..4261) corresponds to Horizontal Y (inverted).
-        Vertical Canvas Y (0..7341) corresponds to Horizontal X.
-        
-        Let's just re-implement `worldToScreen` for the VERTICAL layout directly.
-        UWB X (Long side, 0..2865cm) -> Vertical Y axis
-        UWB Y (Short side, 0..1524cm) -> Vertical X axis
         """
         geometry = parse_court_dxf(COURT_DXF_PATH)
         self.courtBounds = geometry.bounds
         
         courtWidth = self.courtBounds.max_x - self.courtBounds.min_x  # Long side (~2800)
         courtHeight = self.courtBounds.max_y - self.courtBounds.min_y # Short side (~1500)
-        
-        # Vertical Canvas Dimensions
-        # We want to fit Court Width (Long) into Canvas Height (7341)
-        # We want to fit Court Height (Short) into Canvas Width (4261)
         
         PADDING = 50
         scaleY = (self.vert_h - PADDING * 2) / courtWidth  # Map X(Long) to Height
@@ -124,7 +102,6 @@ class Validator:
         scaledLong = courtWidth * self.actualScale
         scaledShort = courtHeight * self.actualScale
         
-        # Centering offsets
         self.offsetY = (self.vert_h - scaledLong) / 2 # Vertical padding
         self.offsetX = (self.vert_w - scaledShort) / 2 # Horizontal padding
         
@@ -141,27 +118,11 @@ class Validator:
     def uwbToVerticalScreen(self, x_cm, y_cm):
         """
         Convert UWB (cm) coords to Vertical Canvas Pixels.
-        Note: logic must invert/flip axes to match standard basketball court orientation.
-        
-        UWB X (Long) -> Vertical Y (Bottom to Top? or Top to Bottom?)
-        UWB Y (Short) -> Vertical X (Left to Right)
-        
-        Trial/Error logic from observation:
-        Usually X is 'Along Court Length'. In vertical image, that's Y axis.
-        Usually Y is 'Along Court Width'. In vertical image, that's X axis.
         """
-        # Map UWB X (Min..Max) to Canvas Y (Height..0) or (0..Height)
-        # Standard: (x - min) * scale + offset
-        
         # Vertical Y (matches Long dimension X)
-        # In 90 CW Rotation:
-        # Horizontal Left (Low X) -> Vertical Top (Low Y)
-        # Horizontal Right (High X) -> Vertical Bottom (High Y)
-        # So sy should scale directly with X, not inverted.
         sy = ((x_cm - self.courtBounds.min_x) * self.actualScale) + self.offsetY
         
         # Vertical X (matches Short dimension Y)
-        # sx = (y - min) * scale + offset
         sx = ((y_cm - self.courtBounds.min_y) * self.actualScale) + self.offsetX
         
         return int(sx), int(sy)
@@ -213,20 +174,25 @@ class Validator:
         
         cap = cv2.VideoCapture(self.video_path)
         fps = cap.get(cv2.CAP_PROP_FPS)
+        
         start_frame = int(start_seconds * fps)
         end_frame = int(end_seconds * fps)
         num_frames = end_frame - start_frame
         
         cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
         
-        # Calculate Video Panel Dimensions
-        # We fix Output Height to 1080.
-        # Original Video (1920x1080) fits perfectly on Left.
-        # Court Vertical Panel (4261x7341) needs to be resized to H=1080.
+        # Initialize UWBAssociator
+        self.uwb_associator = UWBAssociator(
+            tags_dir=Path("data/tags"),
+            sync_offset_seconds=sync_offset,
+            proximity_threshold=self.radius_200cm_px,
+            remapping_cooldown=60, # 2 seconds
+            canvas_width=self.vert_w,
+            canvas_height=self.vert_h
+        )
         
         court_scale = OUTPUT_HEIGHT / self.vert_h
         court_panel_w = int(self.vert_w * court_scale)
-        
         TOTAL_WIDTH = 1920 + court_panel_w
         
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
@@ -239,7 +205,8 @@ class Validator:
             if not ret: break
             
             current_frame = start_frame + frame_idx
-            u_sec = (current_frame / fps) + sync_offset
+            video_time_sec = current_frame / fps
+            u_sec = video_time_sec + sync_offset
             target_dt = self.uwb_start + timedelta(seconds=u_sec)
             
             # --- 1. Prepare Vertical Canvas ---
@@ -249,7 +216,7 @@ class Validator:
             uwb = self.get_uwb_positions(target_dt)
             uwb_screen = {} # tag_id -> (sx, sy)
             
-            # Draw Proximity Circles (Overlay)
+            # Draw Proximity Circles
             overlay = canvas.copy()
             for tag_id, (ux, uy) in uwb.items():
                 sx, sy = self.uwbToVerticalScreen(ux, uy)
@@ -257,7 +224,7 @@ class Validator:
                 cv2.circle(overlay, (sx, sy), self.radius_200cm_px, COLOR_LIGHT_BLUE, 2)
             cv2.addWeighted(overlay, 0.3, canvas, 0.7, 0, canvas)
             
-            # Draw Blue Dots
+            # Draw Blue Dots (Actual UWB)
             for tag_id, (sx, sy) in uwb_screen.items():
                 cv2.circle(canvas, (sx, sy), self.DOT_RADIUS, COLOR_BLUE, -1)
                 cv2.circle(canvas, (sx, sy), self.DOT_RADIUS, COLOR_WHITE, self.DOT_OUTLINE)
@@ -265,17 +232,16 @@ class Validator:
             # --- 3. Detect Players & Project ---
             tracked_players = self.player_detector.track_players(frame)
             
-            # First pass: Project all players to Vertical Canvas
-            # Store as (player_obj, canvas_x, canvas_y)
             projected_players = []
-            
             for player in tracked_players:
                 bx, by = player['bottom']
                 try:
-                    # Calibration returns coords in ROTATED Vertical Canvas space (observed from generate_red_dots)
                     cx, cy = self.calibration.image_to_court(bx, by)
-                    
                     if 0 <= cx < self.vert_w and 0 <= cy < self.vert_h:
+                        # Append projected coords to player dict for Associator
+                        player['court_x'] = float(cx)
+                        player['court_y'] = float(cy)
+                        
                         projected_players.append({
                             'player': player,
                             'cx': int(cx),
@@ -284,55 +250,52 @@ class Validator:
                 except:
                     pass
 
-            # --- 4. Association Logic (Closest Player) ---
-            # Map TagID -> Closest Player Index
-            # Map Player Index -> Associated Tag ID using simple greedy or best match
+            # --- 4. Association (Persistent) ---
+            # Pass original player dicts (which now contain court_x/y) to Associator
+            players_for_acc = [p['player'] for p in projected_players]
             
-            player_tag_map = {} # player_idx -> tag_id
-            
-            # We want: For each Tag, find players in circle. 
-            # If multiple, find closest. Assign Tag to that player.
-            # Ideally 1-to-1 but strictly: 
-            # "if red dot is inside 200cm... if two or more... closer one will have that tag"
-            
-            # Iterate Tags
-            for tag_id, (tk_x, tk_y) in uwb_screen.items():
-                candidates = []
-                for p_idx, p_data in enumerate(projected_players):
-                    dist = np.sqrt((p_data['cx'] - tk_x)**2 + (p_data['cy'] - tk_y)**2)
-                    if dist <= self.radius_200cm_px:
-                        candidates.append((dist, p_idx))
-                
-                if candidates:
-                    # Sort by distance
-                    candidates.sort(key=lambda x: x[0])
-                    best_dist, best_p_idx = candidates[0]
-                    
-                    # Assign this tag to this player
-                    # Note: A player could theoretically be closest to TWO tags? 
-                    # Usually unlikely with 200cm overlap, but let's handle it.
-                    # If player already has a tag, overwrite only if this one is closer?
-                    # Or just overwrite.
-                    
-                    # Check if player already assigned (optional, simplification: just assign)
-                    player_tag_map[best_p_idx] = tag_id
+            # Associator modifies list in-place
+            self.uwb_associator.associate(video_time_sec, players_for_acc)
 
             # --- 5. Draw Players & Annotate Video ---
             for p_idx, p_data in enumerate(projected_players):
                 cx, cy = p_data['cx'], p_data['cy']
                 player = p_data['player']
                 
-                associated_tag = player_tag_map.get(p_idx)
+                assigned_tag = player.get('uwb_tag_id')
                 
-                if associated_tag:
-                    color = COLOR_GREEN
-                    label = f"Tag {associated_tag}"
-                    
-                    # Draw Line to Tag
-                    tx, ty = uwb_screen[associated_tag]
-                    cv2.line(canvas, (cx, cy), (tx, ty), COLOR_WHITE, 2)
+                # Logic:
+                # 1. If no tag: RED
+                # 2. If tag:
+                #    Check if tag is currently visible (in uwb_screen)
+                #    If visible: check distance -> Green/Red
+                #    If invisible: Red (or Orange?) -> Keep Tag Label
+                
+                dist_to_tag = float('inf')
+                
+                if assigned_tag is not None:
+                    if assigned_tag in uwb_screen:
+                        tx, ty = uwb_screen[assigned_tag]
+                        dist_to_tag = np.sqrt((cx - tx)**2 + (cy - ty)**2)
+                        
+                        if dist_to_tag <= self.radius_200cm_px:
+                            color = COLOR_GREEN
+                            
+                            # Draw line to tag
+                            cv2.line(canvas, (cx, cy), (tx, ty), COLOR_WHITE, 2)
+                        else:
+                            # Tag assigned but drifted far away
+                            color = COLOR_RED 
+                    else:
+                        # Tag assigned but not in current UWB frame (Dropout/Ghost)
+                        color = COLOR_RED # Or COLOR_ORANGE if distinct
                 else:
                     color = COLOR_RED
+                
+                # Determine Label
+                if assigned_tag is not None:
+                    label = f"Tag {assigned_tag}"
+                else:
                     label = f"ID {player.get('track_id')}"
                 
                 # Draw on Vertical Canvas
@@ -344,18 +307,18 @@ class Validator:
                 x1, y1, x2, y2 = map(int, bbox)
                 
                 cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-                if associated_tag: # Only showing Tag ID if associated (as requested?)
-                                   # "if red dot inside... show that tag id on video"
-                                   # Implicitly, don't show Track ID if not associated?
-                                   # Or keep track ID? User said "show that tag id".
-                    cv2.putText(frame, label, (x1, y1 - 10), 
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
-                    # Also put background
+                
+                # Show Tag ID if assigned (or ID if needed)
+                if assigned_tag is not None:
+                    # Draw text with background
+                    text_size, _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2)
+                    text_w, text_h = text_size
+                    cv2.rectangle(frame, (x1, y1 - text_h - 10), (x1 + text_w, y1), color, -1)
+                    cv2.putText(frame, label, (x1, y1 - 5), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.8, COLOR_WHITE, 2)
                     
             # --- 6. Stitch ---
-            # Resize Vertical Canvas to Panel Width
             canvas_resized = cv2.resize(canvas, (court_panel_w, OUTPUT_HEIGHT))
-            
             combined = np.zeros((OUTPUT_HEIGHT, TOTAL_WIDTH, 3), dtype=np.uint8)
             combined[0:1080, 0:1920] = frame
             combined[0:1080, 1920:TOTAL_WIDTH] = canvas_resized

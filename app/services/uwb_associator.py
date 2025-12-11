@@ -30,8 +30,8 @@ class UWBAssociator:
         validation_window: float = 5.0,
         remapping_cooldown: int = 30,
         court_dxf: Path = Path("court_2.dxf"),
-        canvas_width: int = 4261,  # Rotated canvas width
-        canvas_height: int = 7341  # Rotated canvas height
+        canvas_width: int = 4261,  # Vertical canvas width
+        canvas_height: int = 7341  # Vertical canvas height
     ):
         """
         Initialize UWB Associator
@@ -44,8 +44,8 @@ class UWBAssociator:
             validation_window: Time window (seconds) for validating existing mappings
             remapping_cooldown: Minimum frames before allowing remapping
             court_dxf: Path to court DXF file for coordinate transformation
-            canvas_width: Canvas width after 90° rotation
-            canvas_height: Canvas height after 90° rotation
+            canvas_width: Canvas width (Vertical)
+            canvas_height: Canvas height (Vertical)
         """
         self.tags_dir = Path(tags_dir)
         self.sync_offset = sync_offset_seconds
@@ -84,51 +84,51 @@ class UWBAssociator:
         logger.info(f"  UWB start time: {self.uwb_start_time}")
 
     def _setup_coordinate_transform(self):
-        """Setup UWB world-to-screen coordinate transformation"""
+        """
+        Setup UWB world-to-screen coordinate transformation.
+        Matches logic in validation_overlap.py for Vertical Canvas.
+        """
         # Parse court DXF to get world bounds
         geometry = parse_court_dxf(self.court_dxf)
         self.court_bounds = geometry.bounds
 
-        # Calculate scale (same logic as generate_blue_dots.py)
-        # Note: We're working with HORIZONTAL dimensions (before 90° rotation)
-        HORIZONTAL_WIDTH = 7341  # Will be rotated to become height
-        HORIZONTAL_HEIGHT = 4261  # Will be rotated to become width
-
-        court_width = self.court_bounds.max_x - self.court_bounds.min_x
-        court_height = self.court_bounds.max_y - self.court_bounds.min_y
-
+        # Canvas Dimensions (Vertical)
+        # canvas_width (~4261) corresponds to Short Side of Court
+        # canvas_height (~7341) corresponds to Long Side of Court
+        
+        court_width = self.court_bounds.max_x - self.court_bounds.min_x  # Long side (X)
+        court_height = self.court_bounds.max_y - self.court_bounds.min_y # Short side (Y)
+        
         PADDING = 50
-        scale_x = (HORIZONTAL_WIDTH - PADDING * 2) / court_width
-        scale_y = (HORIZONTAL_HEIGHT - PADDING * 2) / court_height
+        
+        # Scale X(Long) to Canvas Height
+        scale_y = (self.canvas_height - PADDING * 2) / court_width
+        
+        # Scale Y(Short) to Canvas Width
+        scale_x = (self.canvas_width - PADDING * 2) / court_height
+        
         self.scale = min(scale_x, scale_y)
-
-        scaled_width = court_width * self.scale
-        scaled_height = court_height * self.scale
-        self.offset_x = (HORIZONTAL_WIDTH - scaled_width) / 2
-        self.offset_y = (HORIZONTAL_HEIGHT - scaled_height) / 2
+        
+        scaled_long = court_width * self.scale
+        scaled_short = court_height * self.scale
+        
+        # Centering offsets
+        self.offset_y = (self.canvas_height - scaled_long) / 2 # Vertical padding
+        self.offset_x = (self.canvas_width - scaled_short) / 2 # Horizontal padding
 
         logger.debug(f"Coordinate transform setup: scale={self.scale:.6f}")
 
     def _world_to_screen(self, x_world: float, y_world: float) -> Tuple[float, float]:
         """
-        Convert UWB world coordinates to screen coordinates (BEFORE rotation)
-
-        This matches the worldToScreen() function in generate_blue_dots.py
-        Returns coordinates in horizontal orientation (will be rotated 90° CW)
+        Convert UWB world coordinates to screen coordinates (Vertical Canvas).
         """
-        HORIZONTAL_HEIGHT = 4261  # Height before rotation
-
-        sx = ((x_world - self.court_bounds.min_x) * self.scale) + self.offset_x
-        sy = HORIZONTAL_HEIGHT - (((y_world - self.court_bounds.min_y) * self.scale) + self.offset_y)
-
-        # After 90° CW rotation: (sx, sy) -> (sy, canvas_height - sx)
-        # But we need to compare in the same coordinate system as homography output
-        # Homography outputs coordinates in ROTATED space (4261 x 7341)
-        # So we need to rotate our coordinates too
-        rotated_x = sy
-        rotated_y = 7341 - sx  # HORIZONTAL_WIDTH - sx
-
-        return (rotated_x, rotated_y)
+        # Vertical Y (matches Long dimension X = x_world)
+        sy = ((x_world - self.court_bounds.min_x) * self.scale) + self.offset_y
+        
+        # Vertical X (matches Short dimension Y = y_world)
+        sx = ((y_world - self.court_bounds.min_y) * self.scale) + self.offset_x
+        
+        return int(sx), int(sy)
 
     def _load_uwb_data(self) -> Dict:
         """Load UWB tag data from JSON files"""
@@ -214,7 +214,8 @@ class UWBAssociator:
             player_y = player.get('court_y')
 
             if player_x is None or player_y is None:
-                logger.warning(f"Track {track_id} missing court coordinates")
+                # logger.warning(f"Track {track_id} missing court coordinates") 
+                # Reduced logging to avoid spam
                 player['uwb_tag_id'] = None
                 player['association_confidence'] = 'NO_COORDS'
                 continue
@@ -233,7 +234,7 @@ class UWBAssociator:
                     continue
 
                 # Existing mapping failed validation
-                logger.warning(f"Track {track_id} mapping to tag {tag_id} failed validation")
+                logger.debug(f"Track {track_id} mapping to tag {tag_id} failed validation")
 
                 # Only remap if cooldown elapsed
                 if self.mapping_age.get(track_id, 0) < self.remapping_cooldown:
@@ -264,8 +265,6 @@ class UWBAssociator:
                 player['uwb_tag_id'] = None
                 player['association_confidence'] = 'LOW'
                 player['association_distance'] = distance if best_tag_id else None
-
-                logger.debug(f"Track {track_id} no nearby tag (closest: {distance:.2f}m if distance else 'N/A')")
 
         return tracked_players
 
