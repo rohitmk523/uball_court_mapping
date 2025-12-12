@@ -1,12 +1,16 @@
 """ByteTrack Tracker for Basketball Player Tracking
 
-Simplified version using only YOLO bounding boxes (no SAM2 masks).
-Provides persistent tracking IDs across frames using motion-based matching.
+Enhanced version supporting both YOLO bounding boxes and optional SAM2 masks.
+Provides persistent tracking IDs across frames using motion-based matching
+with optional mask-based features for improved accuracy.
 """
 
 import numpy as np
 from typing import List, Dict, Optional
 import supervision as sv
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class ByteTrackTracker:
@@ -17,7 +21,8 @@ class ByteTrackTracker:
         track_activation_threshold: float = 0.25,
         lost_track_buffer: int = 50,
         minimum_matching_threshold: float = 0.8,
-        frame_rate: int = 30
+        frame_rate: int = 30,
+        use_mask_features: bool = False
     ):
         """
         Initialize ByteTrack tracker
@@ -27,6 +32,7 @@ class ByteTrackTracker:
             lost_track_buffer: Number of frames to keep lost tracks
             minimum_matching_threshold: IoU threshold for matching
             frame_rate: Video frame rate
+            use_mask_features: Whether to use SAM2 mask features for enhanced tracking
         """
         # Initialize base ByteTrack tracker from supervision
         self.tracker = sv.ByteTrack(
@@ -42,14 +48,18 @@ class ByteTrackTracker:
         self.min_aspect_ratio = 0.3
         self.max_aspect_ratio = 1.2
 
+        # Mask feature support
+        self.use_mask_features = use_mask_features
+
         # Tracking statistics
         self.frame_count = 0
         self.track_history = {}  # track_id -> {'positions': [], 'first_frame': int, ...}
 
-        print(f"ByteTrack tracker initialized")
-        print(f"  Activation threshold: {track_activation_threshold}")
-        print(f"  Lost track buffer: {lost_track_buffer} frames")
-        print(f"  Min matching threshold: {minimum_matching_threshold}")
+        logger.info(f"ByteTrack tracker initialized")
+        logger.info(f"  Activation threshold: {track_activation_threshold}")
+        logger.info(f"  Lost track buffer: {lost_track_buffer} frames")
+        logger.info(f"  Min matching threshold: {minimum_matching_threshold}")
+        logger.info(f"  Mask-based features: {use_mask_features}")
 
     def update(self, detections: List[Dict], frame: Optional[np.ndarray] = None) -> List[Dict]:
         """
@@ -138,7 +148,7 @@ class ByteTrackTracker:
         sv_detections: sv.Detections,
         original_detections: List[Dict]
     ) -> List[Dict]:
-        """Convert supervision format back to our format with tracking IDs"""
+        """Convert supervision format back to our format with tracking IDs and mask features"""
         tracked_players = []
 
         if len(sv_detections) == 0:
@@ -153,23 +163,45 @@ class ByteTrackTracker:
             track_id = int(sv_detections.tracker_id[i])
             bbox = sv_detections.xyxy[i].tolist()
 
+            # Use mask centroid if available and mask features enabled
+            if self.use_mask_features and 'mask_centroid' in original_det:
+                center = list(original_det['mask_centroid'])
+                # Use refined bbox bottom if available
+                if 'refined_bbox' in original_det:
+                    refined_bbox = original_det['refined_bbox']
+                    bottom = [
+                        (refined_bbox[0] + refined_bbox[2]) / 2,
+                        refined_bbox[3]
+                    ]
+                else:
+                    bottom = [center[0], bbox[3]]
+            else:
+                # Use traditional bbox center/bottom
+                center = [
+                    (bbox[0] + bbox[2]) / 2,
+                    (bbox[1] + bbox[3]) / 2
+                ]
+                bottom = [
+                    (bbox[0] + bbox[2]) / 2,
+                    bbox[3]
+                ]
+
             # Create tracked player with ID
             tracked_player = {
                 'track_id': track_id,
                 'bbox': bbox,
                 'confidence': float(sv_detections.confidence[i]),
                 'class_id': int(sv_detections.class_id[i]),
-                'center': [
-                    (bbox[0] + bbox[2]) / 2,
-                    (bbox[1] + bbox[3]) / 2
-                ],
-                'bottom': [
-                    (bbox[0] + bbox[2]) / 2,
-                    bbox[3]  # Bottom of bbox
-                ],
+                'center': center,
+                'bottom': bottom,
                 'area': (bbox[2] - bbox[0]) * (bbox[3] - bbox[1]),
                 'frame_count': self.frame_count
             }
+
+            # Copy over mask data if available
+            for key in ['mask', 'refined_bbox', 'mask_centroid', 'mask_area', 'mask_confidence']:
+                if key in original_det:
+                    tracked_player[key] = original_det[key]
 
             # Copy over any additional data from original detection
             for key in ['uwb_tag_id', 'court_x', 'court_y']:

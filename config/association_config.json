@@ -1,0 +1,13 @@
+{
+  "smoothing": {
+    "window": 7,
+    "alpha": 0.3
+  },
+  "voting": {
+    "window": 60,
+    "threshold": 0.6
+  },
+  "proximity": {
+    "threshold_px": 200.0
+  }
+}

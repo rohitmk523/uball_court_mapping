@@ -8,7 +8,8 @@ A comprehensive web-based system for tracking basketball players using UWB (Ultr
 - **Court Rendering**: Automatic court geometry extraction from DXF files
 - **Video Calibration**: Manual correspondence point selection for homography computation
 - **Player Detection**: YOLOv11-based player detection in video frames
-- **Multi-Object Tracking**: ByteTrack algorithm for consistent player tracking
+- **SAM2 Segmentation** (Optional): Enhanced player segmentation for improved tracking accuracy
+- **Multi-Object Tracking**: ByteTrack algorithm for consistent player tracking with optional mask-based features
 - **Tag-to-Player Matching**: Automatic matching of UWB tags to detected players
 - **Timestamp Synchronization**: Manual sync point setting for video-UWB alignment
 - **Interactive Playback**: Frame-by-frame playback with FPS control (1-30 FPS)
@@ -47,6 +48,21 @@ pip install -r requirements.txt
 ```bash
 python -c "import cv2, ultralytics, ezdxf; print('All dependencies installed successfully')"
 ```
+
+### 4. Optional: Install SAM2 for Enhanced Segmentation
+
+For improved tracking accuracy with precise player segmentation:
+
+```bash
+# Install SAM2
+pip install git+https://github.com/facebookresearch/segment-anything-2.git
+
+# Download SAM2 checkpoint
+mkdir -p checkpoints
+wget -P checkpoints/ https://dl.fbaipublicfiles.com/segment_anything_2/072824/sam2_hiera_large.pt
+```
+
+See [SAM2_INTEGRATION.md](SAM2_INTEGRATION.md) for detailed setup and usage instructions.
 
 ## Quick Start
 

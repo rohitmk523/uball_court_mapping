@@ -1,0 +1,23 @@
+{
+  "sam2": {
+    "enabled": false,
+    "model_cfg": "sam2_hiera_l.yaml",
+    "checkpoint_path": "checkpoints/sam2_hiera_large.pt",
+    "device": "cpu",
+    "min_mask_area": 1000,
+    "stability_score_thresh": 0.88,
+    "box_expansion": 10
+  },
+  "visualization": {
+    "show_masks": true,
+    "mask_alpha": 0.5,
+    "mask_only": false,
+    "show_centroids": true,
+    "show_refined_bbox": true
+  },
+  "tracking": {
+    "use_mask_features": true,
+    "use_mask_centroid": true,
+    "use_refined_bbox": true
+  }
+}

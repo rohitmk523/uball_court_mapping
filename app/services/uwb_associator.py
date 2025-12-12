@@ -31,7 +31,12 @@ class UWBAssociator:
         remapping_cooldown: int = 30,
         court_dxf: Path = Path("court_2.dxf"),
         canvas_width: int = 4261,  # Vertical canvas width
-        canvas_height: int = 7341  # Vertical canvas height
+        canvas_height: int = 7341,  # Vertical canvas height
+        # Data cleaning parameters
+        enable_uwb_cleaning: bool = True,
+        max_velocity_cm_s: float = 1000.0,  # 10 m/s max speed
+        gap_interpolation_max_s: float = 1.0,  # Max 1 second gaps
+        smoothing_window_size: int = 5  # 5-frame moving average
     ):
         """
         Initialize UWB Associator
@@ -46,12 +51,30 @@ class UWBAssociator:
             court_dxf: Path to court DXF file for coordinate transformation
             canvas_width: Canvas width (Vertical)
             canvas_height: Canvas height (Vertical)
+            enable_uwb_cleaning: Enable UWB data cleaning (outlier rejection, interpolation, smoothing)
+            max_velocity_cm_s: Maximum physically possible velocity in cm/s (default 1000 = 10 m/s)
+            gap_interpolation_max_s: Maximum temporal gap to interpolate (seconds)
+            smoothing_window_size: Moving average window size (frames)
         """
         self.tags_dir = Path(tags_dir)
         self.sync_offset = sync_offset_seconds
         self.proximity_threshold = proximity_threshold
         self.validation_window = validation_window
         self.remapping_cooldown = remapping_cooldown
+
+        # Data cleaning parameters
+        self.enable_uwb_cleaning = enable_uwb_cleaning
+        self.max_velocity_cm_s = max_velocity_cm_s
+        self.gap_interpolation_max_s = gap_interpolation_max_s
+        self.smoothing_window_size = smoothing_window_size
+
+        # Statistics tracking for data cleaning
+        self.cleaning_stats = {
+            'total_points': 0,
+            'outliers_rejected': 0,
+            'gaps_filled': 0,
+            'total_interpolated_points': 0
+        }
 
         # Load court geometry for UWB coordinate transformation
         self.court_dxf = court_dxf
@@ -161,7 +184,7 @@ class UWBAssociator:
         return datetime.fromisoformat(first_position['datetime'])
 
     def _sort_and_index_uwb_data(self) -> Dict:
-        """Sort UWB positions by timestamp for efficient lookup"""
+        """Sort UWB positions by timestamp and apply data cleaning"""
         sorted_data = {}
 
         for tag_id, positions in self.tag_data.items():
@@ -172,9 +195,304 @@ class UWBAssociator:
                 sorted_positions.append((dt, pos['x'], pos['y']))
 
             sorted_positions.sort(key=lambda x: x[0])
+
+            # Apply preprocessing if enabled
+            if self.enable_uwb_cleaning and sorted_positions:
+                sorted_positions = self._preprocess_uwb_trajectory(
+                    tag_id, sorted_positions
+                )
+
             sorted_data[tag_id] = sorted_positions
 
+        # Log statistics
+        if self.enable_uwb_cleaning:
+            self._log_cleaning_statistics()
+
         return sorted_data
+
+    def _reject_outliers(
+        self,
+        tag_id: int,
+        positions: List[Tuple[datetime, float, float]]
+    ) -> List[Tuple[datetime, float, float]]:
+        """
+        Reject positions with physically impossible velocities.
+
+        Strategy:
+        - Calculate velocity from previous valid point
+        - Mark as outlier if velocity > max_velocity_cm_s (1000 cm/s = 10 m/s)
+        - Keep first point (no previous reference)
+
+        Edge Cases:
+        - First point: Always kept (no reference)
+        - Consecutive outliers: Each tested against last VALID point
+        - All points rejected: Return list with only first point
+
+        Args:
+            tag_id: UWB tag identifier
+            positions: Sorted list of (datetime, x_cm, y_cm) tuples
+
+        Returns:
+            Cleaned trajectory with outliers removed
+        """
+        if len(positions) <= 1:
+            return positions
+
+        cleaned = []
+        outlier_count = 0
+
+        # Always keep first point as reference
+        cleaned.append(positions[0])
+        last_valid_dt, last_valid_x, last_valid_y = positions[0]
+
+        for i in range(1, len(positions)):
+            curr_dt, curr_x, curr_y = positions[i]
+
+            # Calculate time difference in seconds
+            time_diff = (curr_dt - last_valid_dt).total_seconds()
+
+            # Skip if time_diff is zero or negative (duplicate timestamps)
+            if time_diff <= 0:
+                outlier_count += 1
+                continue
+
+            # Calculate distance in cm
+            distance_cm = np.sqrt(
+                (curr_x - last_valid_x)**2 +
+                (curr_y - last_valid_y)**2
+            )
+
+            # Calculate velocity in cm/s
+            velocity_cm_s = distance_cm / time_diff
+
+            # Check if velocity is physically possible
+            if velocity_cm_s <= self.max_velocity_cm_s:
+                # Valid point
+                cleaned.append(positions[i])
+                last_valid_dt, last_valid_x, last_valid_y = curr_dt, curr_x, curr_y
+            else:
+                # Outlier detected
+                outlier_count += 1
+                logger.debug(
+                    f"Tag {tag_id}: Outlier at {curr_dt} "
+                    f"(velocity={velocity_cm_s:.1f} cm/s, "
+                    f"distance={distance_cm:.1f} cm, dt={time_diff:.3f}s)"
+                )
+
+        self.cleaning_stats['outliers_rejected'] += outlier_count
+
+        if outlier_count > 0:
+            logger.info(
+                f"Tag {tag_id}: Rejected {outlier_count} outliers "
+                f"({outlier_count/len(positions)*100:.1f}%)"
+            )
+
+        return cleaned
+
+    def _interpolate_gaps(
+        self,
+        tag_id: int,
+        positions: List[Tuple[datetime, float, float]]
+    ) -> List[Tuple[datetime, float, float]]:
+        """
+        Fill temporal gaps with linearly interpolated positions.
+
+        Strategy:
+        - Detect gaps > 1 frame (~0.066s) but < gap_interpolation_max_s (1.0s)
+        - Calculate expected frame times at ~15.74 Hz
+        - Linearly interpolate (x, y) at missing timestamps
+
+        Edge Cases:
+        - Gaps > 1.0s: Not interpolated (likely tracking loss)
+        - Gaps < 1 frame: No interpolation needed
+        - Last position: No interpolation (no next point)
+
+        Args:
+            tag_id: UWB tag identifier
+            positions: Sorted list of (datetime, x_cm, y_cm) tuples
+
+        Returns:
+            Trajectory with interpolated positions
+        """
+        if len(positions) <= 1:
+            return positions
+
+        EXPECTED_FRAME_INTERVAL = 0.066  # ~15 Hz (1/15.74)
+        FRAME_TOLERANCE = 0.01  # 10ms tolerance
+
+        interpolated = []
+        total_gaps_filled = 0
+        total_points_added = 0
+
+        for i in range(len(positions) - 1):
+            curr_dt, curr_x, curr_y = positions[i]
+            next_dt, next_x, next_y = positions[i + 1]
+
+            # Always keep current point
+            interpolated.append(positions[i])
+
+            # Calculate gap duration
+            gap_duration = (next_dt - curr_dt).total_seconds()
+
+            # Check if gap needs interpolation
+            if gap_duration > (EXPECTED_FRAME_INTERVAL + FRAME_TOLERANCE):
+                if gap_duration <= self.gap_interpolation_max_s:
+                    # Calculate number of missing frames
+                    missing_frames = int(gap_duration / EXPECTED_FRAME_INTERVAL) - 1
+
+                    if missing_frames > 0:
+                        # Linear interpolation
+                        for frame_idx in range(1, missing_frames + 1):
+                            # Interpolation factor [0, 1]
+                            alpha = frame_idx / (missing_frames + 1)
+
+                            # Interpolated timestamp
+                            interp_dt = curr_dt + timedelta(
+                                seconds=gap_duration * alpha
+                            )
+
+                            # Interpolated position
+                            interp_x = curr_x + (next_x - curr_x) * alpha
+                            interp_y = curr_y + (next_y - curr_y) * alpha
+
+                            interpolated.append((interp_dt, interp_x, interp_y))
+                            total_points_added += 1
+
+                        total_gaps_filled += 1
+                else:
+                    # Gap too large - likely tracking dropout
+                    logger.debug(
+                        f"Tag {tag_id}: Large gap at {curr_dt} "
+                        f"(duration={gap_duration:.2f}s) - not interpolating"
+                    )
+
+        # Add last point
+        interpolated.append(positions[-1])
+
+        self.cleaning_stats['gaps_filled'] += total_gaps_filled
+        self.cleaning_stats['total_interpolated_points'] += total_points_added
+
+        if total_gaps_filled > 0:
+            logger.info(
+                f"Tag {tag_id}: Filled {total_gaps_filled} gaps "
+                f"(added {total_points_added} interpolated points)"
+            )
+
+        return interpolated
+
+    def _apply_smoothing(
+        self,
+        tag_id: int,
+        positions: List[Tuple[datetime, float, float]]
+    ) -> List[Tuple[datetime, float, float]]:
+        """
+        Apply moving average filter to reduce jitter.
+
+        Strategy:
+        - Use centered window of size smoothing_window_size (default 5)
+        - Window: [i-2, i-1, i, i+1, i+2] for center point i
+        - Edge handling: Use asymmetric windows at boundaries
+
+        Edge Cases:
+        - Start boundary (i < window_size//2): Use forward window [i, i+window]
+        - End boundary (i > len-window_size//2): Use backward window [i-window, i]
+        - Too few points (< window_size): Return unchanged
+
+        Args:
+            tag_id: UWB tag identifier
+            positions: Sorted list of (datetime, x_cm, y_cm) tuples
+
+        Returns:
+            Smoothed trajectory
+        """
+        if len(positions) < self.smoothing_window_size:
+            return positions
+
+        window_radius = self.smoothing_window_size // 2
+        smoothed = []
+
+        for i in range(len(positions)):
+            curr_dt, curr_x, curr_y = positions[i]
+
+            # Determine window bounds
+            if i < window_radius:
+                # Start boundary: forward window
+                start_idx = 0
+                end_idx = min(self.smoothing_window_size, len(positions))
+            elif i >= len(positions) - window_radius:
+                # End boundary: backward window
+                start_idx = max(0, len(positions) - self.smoothing_window_size)
+                end_idx = len(positions)
+            else:
+                # Center: symmetric window
+                start_idx = i - window_radius
+                end_idx = i + window_radius + 1
+
+            # Calculate average position in window
+            window_positions = positions[start_idx:end_idx]
+            avg_x = sum(x for dt, x, y in window_positions) / len(window_positions)
+            avg_y = sum(y for dt, x, y in window_positions) / len(window_positions)
+
+            # Keep original timestamp, use averaged position
+            smoothed.append((curr_dt, avg_x, avg_y))
+
+        logger.debug(f"Tag {tag_id}: Applied smoothing (window={self.smoothing_window_size})")
+
+        return smoothed
+
+    def _preprocess_uwb_trajectory(
+        self,
+        tag_id: int,
+        positions: List[Tuple[datetime, float, float]]
+    ) -> List[Tuple[datetime, float, float]]:
+        """
+        Apply three-stage cleaning to UWB trajectory:
+        1. Outlier rejection (velocity-based)
+        2. Gap interpolation (temporal)
+        3. Smoothing (moving average)
+
+        Args:
+            tag_id: UWB tag identifier
+            positions: Sorted list of (datetime, x_cm, y_cm) tuples
+
+        Returns:
+            Cleaned trajectory as list of (datetime, x_cm, y_cm) tuples
+        """
+        if not positions:
+            return positions
+
+        # Track original count
+        self.cleaning_stats['total_points'] += len(positions)
+
+        # Stage 1: Reject outliers
+        positions = self._reject_outliers(tag_id, positions)
+
+        # Stage 2: Interpolate gaps
+        positions = self._interpolate_gaps(tag_id, positions)
+
+        # Stage 3: Apply smoothing
+        positions = self._apply_smoothing(tag_id, positions)
+
+        return positions
+
+    def _log_cleaning_statistics(self):
+        """Log summary of data cleaning operations"""
+        stats = self.cleaning_stats
+
+        if stats['total_points'] == 0:
+            return
+
+        outlier_pct = (stats['outliers_rejected'] / stats['total_points']) * 100
+        final_count = stats['total_points'] - stats['outliers_rejected'] + stats['total_interpolated_points']
+
+        logger.info("=" * 60)
+        logger.info("UWB Data Cleaning Statistics:")
+        logger.info(f"  Total input points:     {stats['total_points']:,}")
+        logger.info(f"  Outliers rejected:      {stats['outliers_rejected']:,} ({outlier_pct:.2f}%)")
+        logger.info(f"  Gaps filled:            {stats['gaps_filled']:,}")
+        logger.info(f"  Interpolated points:    {stats['total_interpolated_points']:,}")
+        logger.info(f"  Final point count:      {final_count:,}")
+        logger.info("=" * 60)
 
     def associate(
         self,

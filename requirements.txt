@@ -11,3 +11,11 @@ filterpy==1.4.5
 scipy==1.12.0
 lap==0.4.0
 supervision>=0.16.0
+
+# SAM2 dependencies (optional - install only if USE_SAM2=true)
+# Install SAM2 from: https://github.com/facebookresearch/segment-anything-2
+# pip install git+https://github.com/facebookresearch/segment-anything-2.git
+torch>=2.0.0
+torchvision>=0.15.0
+hydra-core>=1.3.0
+iopath>=0.1.10
