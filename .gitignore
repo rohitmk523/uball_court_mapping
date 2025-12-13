@@ -67,4 +67,9 @@ Thumbs.db
 !court_2.dxf
 # Keep calibration files (small JSON/PNG files, not videos)
 
-Uball_tracking
+Uball_tracking# Output directories
+video_output/
+json_output/
+*.mp4
+*.avi
+*.json
