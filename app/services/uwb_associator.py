@@ -622,6 +622,47 @@ class UWBAssociator:
 
         return uwb_positions
 
+    def get_uwb_world_positions_at_time(self, target_dt: datetime) -> Dict[int, Tuple[float, float]]:
+        """
+        Get UWB tag positions at a specific time using binary search.
+        Returns positions in WORLD coordinates (cm) for use with VideoStitcher.
+
+        Args:
+            target_dt: Target datetime to get positions for
+
+        Returns:
+            Dict of {tag_id: (x_cm, y_cm)} in world coordinates
+        """
+        uwb_positions = {}
+
+        for tag_id, sorted_positions in self.sorted_tag_data.items():
+            if not sorted_positions:
+                continue
+
+            # Binary search for closest timestamp
+            timestamps = [dt for dt, x, y in sorted_positions]
+            idx = bisect_left(timestamps, target_dt)
+
+            # Check adjacent positions to find closest
+            candidates = []
+            if idx > 0:
+                time_diff = abs((timestamps[idx - 1] - target_dt).total_seconds())
+                candidates.append((idx - 1, time_diff))
+            if idx < len(timestamps):
+                time_diff = abs((timestamps[idx] - target_dt).total_seconds())
+                candidates.append((idx, time_diff))
+
+            if candidates:
+                best_idx, time_diff = min(candidates, key=lambda x: x[1])
+
+                # Only use if within time threshold (5 seconds)
+                if time_diff < 5.0:
+                    dt, x_world, y_world = sorted_positions[best_idx]
+                    # Return world coordinates (cm) - DO NOT transform
+                    uwb_positions[tag_id] = (x_world, y_world)
+
+        return uwb_positions
+
     def _find_nearest_tag(
         self,
         player_x: float,

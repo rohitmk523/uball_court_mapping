@@ -271,7 +271,9 @@ class PlayerDetector:
         color: Tuple[int, int, int] = (0, 255, 0),  # Green in BGR
         thickness: int = 2,
         show_confidence: bool = True,
-        show_masks: bool = True
+        show_masks: bool = True,
+        color_by_tag_id: bool = False,
+        id_mapper = None
     ) -> np.ndarray:
         """
         Draw detection bounding boxes and masks on frame.
@@ -290,7 +292,13 @@ class PlayerDetector:
         # Draw masks first (if enabled and available)
         if show_masks and self.use_sam2 and self.segmenter is not None:
             mask_alpha = self.sam2_config.get('visualization', {}).get('mask_alpha', 0.5)
-            frame = self.segmenter.visualize_masks(frame, detections, alpha=mask_alpha)
+            frame = self.segmenter.visualize_masks(
+                frame,
+                detections,
+                alpha=mask_alpha,
+                color_by_tag_id=color_by_tag_id,
+                id_mapper=id_mapper
+            )
             # Don't return - continue to draw bounding boxes and IDs on top
 
         # Draw bounding boxes, track IDs, and confidence scores
@@ -313,7 +321,13 @@ class PlayerDetector:
             )
 
             # Prepare label text (track ID + confidence)
-            if track_id is not None and show_confidence:
+            uwb_tag_id = detection.get('uwb_tag_id')
+
+            if id_mapper:
+                text = id_mapper.get_label(track_id, uwb_tag_id, mode='dual')
+                if show_confidence:
+                    text += f" {confidence:.2f}"
+            elif track_id is not None and show_confidence:
                 text = f"ID:{track_id} {confidence:.2f}"
             elif track_id is not None:
                 text = f"ID:{track_id}"

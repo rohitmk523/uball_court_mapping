@@ -252,7 +252,9 @@ class SAM2Segmenter:
         frame: np.ndarray,
         detections: List[Dict],
         alpha: float = 0.5,
-        mask_only: bool = False
+        mask_only: bool = False,
+        color_by_tag_id: bool = False,
+        id_mapper = None
     ) -> np.ndarray:
         """
         Visualize segmentation masks on frame.
@@ -273,7 +275,15 @@ class SAM2Segmenter:
             output = np.zeros_like(frame)
 
         # Generate colors for each detection
-        colors = self._generate_colors(len(detections))
+        if color_by_tag_id and id_mapper is not None:
+            # Use persistent colors from UWB tag_id
+            colors = []
+            for detection in detections:
+                tag_id = detection.get('uwb_tag_id')
+                colors.append(id_mapper.get_color_for_tag(tag_id))
+        else:
+            # Original behavior: color by index
+            colors = self._generate_colors(len(detections))
 
         for i, detection in enumerate(detections):
             if 'mask' not in detection:
@@ -314,7 +324,15 @@ class SAM2Segmenter:
                 # Draw track ID if available
                 if 'track_id' in detection:
                     track_id = detection['track_id']
-                    label = f"ID:{track_id}"
+                    uwb_tag_id = detection.get('uwb_tag_id')
+
+                    # Show both IDs if mapper provided
+                    if id_mapper:
+                        label = id_mapper.get_label(track_id, uwb_tag_id, mode='dual')
+                    elif uwb_tag_id is not None:
+                        label = f"Tag:{uwb_tag_id}"
+                    else:
+                        label = f"ID:{track_id}"
 
                     # Draw label background
                     text_size, _ = cv2.getTextSize(
