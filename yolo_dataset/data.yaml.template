@@ -1,0 +1,24 @@
+# Basketball Court Detection Dataset
+# Download from Roboflow and extract to yolo_dataset/
+
+# Paths (relative to this file)
+path: ../yolo_dataset  # Root directory
+train: train/images    # Train images
+val: val/images        # Validation images
+test: test/images      # Test images (optional)
+
+# Classes (4 classes)
+nc: 4
+names:
+  0: players
+  1: ball
+  2: rim
+  3: court_keypoints
+
+# Dataset info (user should update)
+# roboflow:
+#   workspace: your-workspace
+#   project: basketball-court-tracking
+#   version: 1
+#   license: CC BY 4.0
+#   url: https://universe.roboflow.com/your-workspace/basketball-court-tracking
