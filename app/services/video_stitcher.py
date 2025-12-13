@@ -135,7 +135,7 @@ class VideoStitcher:
         video_frame: np.ndarray,
         tracked_players: List[Dict],
         uwb_positions: Dict[int, Tuple[float, float]],
-        id_mapper: PersistentIDMapper
+        id_mapper: Optional['PersistentIDMapper'] = None
     ) -> np.ndarray:
         """
         Create side-by-side stitched frame: [Video | Court Canvas].
@@ -144,7 +144,7 @@ class VideoStitcher:
             video_frame: Original video frame (already has detections drawn)
             tracked_players: List of tracked players with court coords
             uwb_positions: Dict of {tag_id: (x_cm, y_cm)} UWB positions
-            id_mapper: PersistentIDMapper for color lookup
+            id_mapper: PersistentIDMapper for color lookup (optional, for single-pass mode)
 
         Returns:
             Combined frame [1920px video | scaled canvas]
@@ -186,7 +186,15 @@ class VideoStitcher:
             tag_id = player.get('uwb_tag_id')
 
             # Determine color (by tag_id for persistence)
-            color = id_mapper.get_color_for_tag(tag_id)
+            if id_mapper:
+                color = id_mapper.get_color_for_tag(tag_id)
+            else:
+                # Fallback: random color by tag_id (single-pass mode)
+                if tag_id is not None:
+                    np.random.seed(tag_id)
+                    color = tuple(np.random.randint(0, 255, 3).tolist())
+                else:
+                    color = COLOR_RED
 
             # Check if within proximity of assigned tag
             if tag_id and tag_id in uwb_screen:

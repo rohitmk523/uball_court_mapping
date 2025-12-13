@@ -264,6 +264,154 @@ class PlayerDetector:
             logger.error(f"YOLO detection failed: {e}")
             return []
 
+    def detect_all_objects(
+        self,
+        frame: np.ndarray
+    ) -> Dict[str, List[Dict]]:
+        """
+        Detect all 4 classes: players, ball, rim, court_keypoints.
+
+        Uses fine-tuned YOLO model trained on basketball court dataset.
+
+        Args:
+            frame: Input frame (BGR format)
+
+        Returns:
+            Dictionary with keys:
+                - 'players': List of player detections
+                - 'ball': List of ball detections
+                - 'rim': List of rim detections
+                - 'court_keypoints': List of keypoint detections
+
+            Each detection dict contains:
+                - bbox: [x1, y1, x2, y2]
+                - confidence: float
+                - class_id: int (0=players, 1=ball, 2=rim, 3=court_keypoints)
+                - center: (cx, cy)
+                - bottom: (bx, by)
+                - mask: Binary mask (only for players if SAM2 enabled)
+        """
+        if self.model is None:
+            logger.error("YOLO model not initialized")
+            return {'players': [], 'ball': [], 'rim': [], 'court_keypoints': []}
+
+        try:
+            # Run inference on all classes
+            results = self.model(
+                frame,
+                conf=self.confidence_threshold,
+                verbose=False
+            )
+
+            detections = {
+                'players': [],
+                'ball': [],
+                'rim': [],
+                'court_keypoints': []
+            }
+
+            # Map class IDs to category names
+            class_names = ['players', 'ball', 'rim', 'court_keypoints']
+
+            for result in results:
+                boxes = result.boxes
+                for box in boxes:
+                    # Get box data
+                    x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+                    confidence = float(box.conf[0].cpu().numpy())
+                    class_id = int(box.cls[0].cpu().numpy())
+
+                    # Skip unknown classes
+                    if class_id >= len(class_names):
+                        continue
+
+                    category = class_names[class_id]
+
+                    # Calculate center and bottom points
+                    cx = int((x1 + x2) / 2)
+                    cy = int((y1 + y2) / 2)
+                    bx = int((x1 + x2) / 2)
+                    by = int(y2)  # Bottom of bounding box
+
+                    detection = {
+                        'bbox': [int(x1), int(y1), int(x2), int(y2)],
+                        'confidence': confidence,
+                        'class_id': class_id,
+                        'center': (cx, cy),
+                        'bottom': (bx, by)
+                    }
+
+                    detections[category].append(detection)
+
+            logger.debug(
+                f"Detected: {len(detections['players'])} players, "
+                f"{len(detections['ball'])} balls, "
+                f"{len(detections['rim'])} rims, "
+                f"{len(detections['court_keypoints'])} keypoints"
+            )
+
+            # Apply SAM2 to players only (if enabled)
+            if self.use_sam2 and self.segmenter and detections['players']:
+                detections['players'] = self.segmenter.segment_players(
+                    frame, detections['players']
+                )
+                logger.debug(f"SAM2 enhanced {len(detections['players'])} players")
+
+            return detections
+
+        except Exception as e:
+            logger.error(f"Multi-class detection failed: {e}")
+            return {'players': [], 'ball': [], 'rim': [], 'court_keypoints': []}
+
+    def detect_ball(self, frame: np.ndarray) -> Optional[Dict]:
+        """
+        Detect basketball in frame.
+
+        Convenience method that returns the highest confidence ball detection.
+
+        Args:
+            frame: Input frame (BGR format)
+
+        Returns:
+            Ball detection dict or None if not found
+        """
+        detections = self.detect_all_objects(frame)
+        balls = detections['ball']
+
+        if not balls:
+            return None
+
+        # Return highest confidence ball
+        return max(balls, key=lambda b: b['confidence'])
+
+    def detect_rim(self, frame: np.ndarray) -> List[Dict]:
+        """
+        Detect basketball rim(s) in frame.
+
+        Args:
+            frame: Input frame (BGR format)
+
+        Returns:
+            List of rim detections (usually 1-2 rims depending on camera view)
+        """
+        detections = self.detect_all_objects(frame)
+        return detections['rim']
+
+    def detect_keypoints(self, frame: np.ndarray) -> List[Dict]:
+        """
+        Detect court keypoints in frame.
+
+        Court keypoints are court line intersections used for auto-calibration.
+
+        Args:
+            frame: Input frame (BGR format)
+
+        Returns:
+            List of keypoint detections (~10-15 keypoints typically)
+        """
+        detections = self.detect_all_objects(frame)
+        return detections['court_keypoints']
+
     def draw_detections(
         self,
         frame: np.ndarray,
